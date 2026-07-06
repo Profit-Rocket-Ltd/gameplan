@@ -1,96 +1,89 @@
 <template>
-  <div class="fixed inset-0 flex flex-col overflow-hidden touch-none">
-    <div
-      class="flex-1 overflow-y-auto overscroll-auto bg-surface-base [-webkit-overflow-scrolling:touch]"
-      id="scrollContainer"
-    >
-      <slot />
-    </div>
-    <div
-      class="grid grid-cols-5 shrink-0 bg-surface-elevation-2 border-t border-outline-gray-2 standalone:pb-4"
-      :style="{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }"
-      v-if="!isNewCommentOpen"
-    >
-      <button
-        v-for="tab in tabs"
-        :key="tab.name"
-        class="flex flex-col items-center justify-center py-3 transition active:scale-95"
-        @click="onTabClick(tab)"
-      >
-        <span
-          :class="[tab.icon, 'h-6 w-6', tab.isActive ? 'text-ink-gray-8' : 'text-ink-gray-5']"
+  <MobileShell>
+    <ReadOnlyBanner v-if="readOnlyMode" />
+    <slot />
+
+    <template #nav>
+      <MobileNav v-if="!isNewCommentOpen">
+        <MobileNavItem
+          label="Home"
+          icon="lucide-home"
+          :to="{ name: 'Home' }"
+          :active="isHomeRoute"
         />
-      </button>
-    </div>
-  </div>
+        <MobileNavItem
+          label="Notifications"
+          icon="lucide-bell"
+          :to="{ name: 'Notifications' }"
+          :active="route.name === 'Notifications'"
+        />
+        <MobileNavItem
+          label="Search"
+          icon="lucide-search"
+          :to="{ name: 'Search' }"
+          :active="route.name === 'Search'"
+        />
+        <MobileNavItem label="You" :to="{ name: 'More' }" :active="isMoreRoute">
+          <template #default="{ active }">
+            <UserAvatar
+              v-if="sessionUser.name"
+              :user="sessionUser.name"
+              class="size-6"
+              :class="active ? 'ring-2 ring-outline-gray-4' : ''"
+            />
+            <span
+              v-else
+              class="lucide-menu size-6"
+              :class="active ? 'text-ink-gray-8' : 'text-ink-gray-5'"
+              aria-hidden="true"
+            />
+          </template>
+        </MobileNavItem>
+      </MobileNav>
+    </template>
+  </MobileShell>
 </template>
-<script>
-import { scrollTo } from '@/utils/scrollContainer'
-import { isNewCommentOpen as isNewCommentOpenRef } from '@/data/newComment'
-export default {
-  name: 'MobileLayout',
-  computed: {
-    isNewCommentOpen() {
-      return isNewCommentOpenRef.value
-    },
-    tabs() {
-      return [
-        {
-          name: 'Discussions',
-          icon: 'lucide-newspaper',
-          route: { name: 'Discussions' },
-          isActive: this.$route.name === 'Discussions',
-        },
-        {
-          name: 'MyTasks',
-          icon: 'lucide-list-todo',
-          route: { name: 'MyTasks' },
-          isActive: /MyTasks|Task/g.test(this.$route.name),
-        },
-        {
-          name: 'Spaces',
-          icon: 'lucide-layout-grid',
-          route: { name: 'Spaces' },
-          isActive: [
-            'Spaces',
-            'Space',
-            'SpaceDiscussions',
-            'SpaceDiscussion',
-            'SpaceTasks',
-            'SpaceTask',
-          ].includes(this.$route.name),
-        },
-        {
-          name: 'People',
-          icon: 'lucide-users-2',
-          route: { name: 'People' },
-          isActive: /People|PersonProfile/g.test(this.$route.name),
-          condition: () => this.$user().isNotGuest,
-        },
-        {
-          name: 'Search',
-          icon: 'lucide-search',
-          route: { name: 'Search' },
-          isActive: this.$route.name === 'Search',
-          condition: () => this.$user().isNotGuest,
-        },
-        {
-          name: 'Notifications',
-          icon: 'lucide-inbox',
-          route: { name: 'Notifications' },
-          isActive: this.$route.name === 'Notifications',
-        },
-      ].filter((tab) => (tab.condition ? tab.condition() : true))
-    },
-  },
-  methods: {
-    onTabClick(tab) {
-      if (tab.isActive) {
-        scrollTo({ top: 0, behavior: 'smooth' })
-        return
-      }
-      this.$router.push(tab.route)
-    },
-  },
-}
+
+<script setup lang="ts">
+defineOptions({
+  inheritAttrs: false,
+})
+
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
+import { MobileShell, MobileNav, MobileNavItem } from 'frappe-ui'
+import { isNewCommentOpen } from '@/data/newComment'
+import { useSessionUser } from '@/data/users'
+import ReadOnlyBanner from './ReadOnlyBanner.vue'
+import UserAvatar from './UserAvatar.vue'
+import { readOnlyMode } from '@/data/readOnlyMode'
+
+const route = useRoute()
+const sessionUser = useSessionUser()
+
+const onCommunityRoute = computed(() => route.matched.some((record) => record.meta?.communityScope))
+
+// Home stays lit across every community route, not just the Home page — tapping it
+// still navigates home (MobileNavItem decides scroll-vs-navigate off the current route).
+const isHomeRoute = computed(() => route.name === 'Home' || onCommunityRoute.value)
+
+// "You" spans the whole More section (profile, pages, tasks, bookmarks, drafts).
+const isMoreRoute = computed(() => {
+  const name = route.name?.toString() || ''
+  return [
+    'More',
+    'Bookmarks',
+    'People',
+    'PersonProfile',
+    'PersonProfileProfile',
+    'PersonProfileAboutMe',
+    'PersonProfilePosts',
+    'PersonProfileReplies',
+    'MyPages',
+    'Page',
+    'MyTasks',
+    'Task',
+    'Drafts',
+  ].includes(name)
+})
 </script>

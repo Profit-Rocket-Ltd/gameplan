@@ -1,154 +1,164 @@
 <template>
   <div>
     <div>
-      <PageHeader>
+      <PageHeaderMobile class="sm:hidden" title="Search" />
+      <PageHeader class="hidden sm:flex">
         <Breadcrumbs :items="[{ label: 'Search', route: { name: 'Search' } }]" />
       </PageHeader>
-      <div class="mt-6 body-container">
-        <div class="flex items-center space-x-2">
-          <TextInput
-            ref="searchInput"
-            class="flex-1"
-            placeholder="Search or press / to focus"
-            v-focus
-            :model-value="query"
-            @update:model-value="updateQuery"
-            @keydown="newSearch = true"
-            @keydown.enter="() => submit()"
-          >
-            <template #prefix>
-              <span class="lucide-search w-4 text-ink-gray-5" />
-            </template>
-            <template #suffix>
-              <div class="flex items-center">
-                <button
-                  v-if="query"
-                  @click="clearSearch"
-                  class="p-1 size-6 grid place-content-center focus:outline-none focus:ring focus:ring-outline-gray-3 rounded"
-                >
-                  <span class="lucide-x w-4 text-ink-gray-7" />
-                </button>
-              </div>
-            </template>
-          </TextInput>
-        </div>
-
-        <!-- Filter Panel -->
-        <div class="overflow-x-auto -mx-3 px-3 py-2">
-          <div class="flex gap-2 items-center">
-            <!-- Authors Filter -->
-            <MultiSelect
-              :options="authorsFilterOptions"
-              :model-value="activeFilters.owner || []"
-              @update:model-value="(values) => updateFilter('owner', values)"
-              placeholder="Author"
+      <div class="body-container">
+        <!-- Sticky search + filter toolbar; results scroll beneath it. Bled out
+             by the body-container padding so the background covers the gutters. -->
+        <div class="sticky top-0 z-10 -mx-3 bg-surface-base px-3 pt-5 sm:-mx-5 sm:px-5 sm:pt-6">
+          <div class="flex items-center space-x-2">
+            <TextInput
+              ref="searchInput"
+              class="flex-1"
+              placeholder="Search or press / to focus"
+              v-focus
+              :model-value="query"
+              @update:model-value="updateQuery"
+              @keydown="newSearch = true"
+              @keydown.enter="() => submit()"
             >
-              <template #trigger="{ open, selectedOptions, toggleOpen }">
-                <Button variant="outline" @click="toggleOpen">
-                  <div
-                    class="flex min-h-[20px] items-center"
-                    :class="{ 'gap-2': selectedOptions.length > 0 }"
+              <template #prefix>
+                <span class="lucide-search w-4 text-ink-gray-5" />
+              </template>
+              <template #suffix>
+                <div class="flex items-center">
+                  <button
+                    v-if="query"
+                    @click="clearSearch"
+                    aria-label="Clear search"
+                    class="p-1 size-6 grid place-content-center focus:outline-none focus:ring focus:ring-outline-gray-3 rounded"
                   >
-                    <template v-if="selectedOptions.length > 0">
-                      <div class="isolate flex -space-x-2">
-                        <Avatar
-                          v-for="(opt, i) in selectedOptions.slice(0, 3)"
-                          :key="opt.value"
-                          :image="opt.image"
-                          :label="opt.label"
-                          class="border-2 border-white flex-shrink-0"
-                          size="xs"
-                          :style="{ zIndex: 10 - i }"
-                        />
-                      </div>
-                      <span class="text-ink-gray-7">
-                        {{
-                          selectedOptions.length === 1
-                            ? selectedOptions[0].label
-                            : `${selectedOptions.length} users`
-                        }}
-                      </span>
-                    </template>
-                    <span v-else class="text-ink-gray-4">Author</span>
-                  </div>
-                  <template #suffix>
-                    <span
-                      class="lucide-chevron-down ml-2 h-4 w-4 transition-transform"
-                      :class="{ 'rotate-180': open }"
-                    />
-                  </template>
-                </Button>
+                    <span class="lucide-x w-4 text-ink-gray-7" />
+                  </button>
+                </div>
               </template>
-              <template #item-prefix="{ item }">
-                <Avatar :image="item.image" :label="item.label" size="xs" />
-              </template>
-              <template #item-suffix="{ item }">
-                <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
-                  item.count
-                }}</span>
-              </template>
-            </MultiSelect>
-
-            <!-- Projects Filter -->
-            <MultiSelect
-              variant="outline"
-              :options="spacesFilterOptions"
-              :model-value="activeFilters.project || []"
-              @update:model-value="(values) => updateFilter('project', values)"
-              placeholder="Space"
-            >
-              <template #item-suffix="{ item }">
-                <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
-                  item.count
-                }}</span>
-              </template>
-            </MultiSelect>
-
-            <!-- Teams Filter -->
-            <MultiSelect
-              variant="outline"
-              :options="teamsFilterOptions"
-              :model-value="activeFilters.team || []"
-              @update:model-value="(values) => updateFilter('team', values)"
-              placeholder="Category"
-            >
-              <template #item-suffix="{ item }">
-                <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
-                  item.count
-                }}</span>
-              </template>
-            </MultiSelect>
-
-            <!-- Document Type Filter -->
-            <MultiSelect
-              variant="outline"
-              :options="doctypesFilterOptions"
-              :model-value="activeFilters.doctype || []"
-              @update:model-value="(values) => updateFilter('doctype', values)"
-              placeholder="Type"
-            >
-              <template #item-suffix="{ item }">
-                <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
-                  item.count
-                }}</span>
-              </template>
-            </MultiSelect>
-
-            <!-- Tags Filter -->
-            <MultiSelect
-              variant="outline"
-              :options="tagsFilterOptions"
-              :model-value="activeFilters.tags || []"
-              @update:model-value="(values) => updateFilter('tags', values)"
-              placeholder="Tags"
-            >
-              <template #item-suffix="{ item }">
-                <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
-                  item.count
-                }}</span>
-              </template>
-            </MultiSelect>
+            </TextInput>
           </div>
+
+          <!-- Filter Panel -->
+          <div class="overflow-x-auto -mx-3 px-3 pt-2">
+            <div class="flex gap-2 items-center">
+              <!-- Authors Filter -->
+              <MultiSelect
+                :options="authorsFilterOptions"
+                :model-value="activeFilters.owner || []"
+                @update:model-value="(values) => updateFilter('owner', values)"
+                placeholder="Author"
+              >
+                <template #trigger="{ open, selectedOptions, toggleOpen }">
+                  <Button variant="outline" @click="toggleOpen">
+                    <div
+                      class="flex min-h-[20px] items-center"
+                      :class="{ 'gap-2': selectedOptions.length > 0 }"
+                    >
+                      <template v-if="selectedOptions.length > 0">
+                        <div class="isolate flex -space-x-2">
+                          <Avatar
+                            v-for="(opt, i) in selectedOptions.slice(0, 3)"
+                            :key="opt.value"
+                            :image="opt.image"
+                            :label="opt.label"
+                            class="border-2 border-white flex-shrink-0"
+                            size="xs"
+                            :style="{ zIndex: 10 - i }"
+                          />
+                        </div>
+                        <span class="text-ink-gray-7">
+                          {{
+                            selectedOptions.length === 1
+                              ? selectedOptions[0].label
+                              : `${selectedOptions.length} users`
+                          }}
+                        </span>
+                      </template>
+                      <span v-else class="text-ink-gray-4">Author</span>
+                    </div>
+                    <template #suffix>
+                      <span
+                        class="lucide-chevron-down ml-2 h-4 w-4 transition-transform"
+                        :class="{ 'rotate-180': open }"
+                      />
+                    </template>
+                  </Button>
+                </template>
+                <template #item-prefix="{ item }">
+                  <Avatar :image="item.image" :label="item.label" size="xs" />
+                </template>
+                <template #item-suffix="{ item }">
+                  <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
+                    item.count
+                  }}</span>
+                </template>
+              </MultiSelect>
+
+              <!-- Projects Filter -->
+              <MultiSelect
+                variant="outline"
+                :options="spacesFilterOptions"
+                :model-value="activeFilters.project || []"
+                @update:model-value="(values) => updateFilter('project', values)"
+                placeholder="Space"
+              >
+                <template #item-suffix="{ item }">
+                  <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
+                    item.count
+                  }}</span>
+                </template>
+              </MultiSelect>
+
+              <!-- Teams Filter -->
+              <MultiSelect
+                variant="outline"
+                :options="teamsFilterOptions"
+                :model-value="activeFilters.team || []"
+                @update:model-value="(values) => updateFilter('team', values)"
+                placeholder="Community"
+              >
+                <template #item-suffix="{ item }">
+                  <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
+                    item.count
+                  }}</span>
+                </template>
+              </MultiSelect>
+
+              <!-- Document Type Filter -->
+              <MultiSelect
+                variant="outline"
+                :options="doctypesFilterOptions"
+                :model-value="activeFilters.doctype || []"
+                @update:model-value="(values) => updateFilter('doctype', values)"
+                placeholder="Type"
+              >
+                <template #item-suffix="{ item }">
+                  <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
+                    item.count
+                  }}</span>
+                </template>
+              </MultiSelect>
+
+              <!-- Tags Filter -->
+              <MultiSelect
+                variant="outline"
+                :options="tagsFilterOptions"
+                :model-value="activeFilters.tags || []"
+                @update:model-value="(values) => updateFilter('tags', values)"
+                placeholder="Tags"
+              >
+                <template #item-suffix="{ item }">
+                  <span v-if="(item.count ?? 0) > 0" class="text-xs text-ink-gray-5">{{
+                    item.count
+                  }}</span>
+                </template>
+              </MultiSelect>
+            </div>
+          </div>
+          <!-- Soft fade so results dissolve into the toolbar as they scroll under. -->
+          <div
+            class="pointer-events-none absolute inset-x-0 top-full h-6 bg-gradient-to-b from-surface-base/90 to-transparent"
+          />
         </div>
 
         <!-- Search Summary -->
@@ -172,9 +182,7 @@
             <template v-else-if="searchResponse?.summary">
               <div class="space-y-1">
                 <p class="text-ink-gray-6">
-                  {{ searchResponse.summary.filtered_matches }} matches ({{
-                    searchResponse.summary.duration
-                  }}s)
+                  {{ visibleSearchResults.length }} matches ({{ searchResponse.summary.duration }}s)
                   <span v-if="hasActiveFilters()">
                     •
                     {{ Object.keys(searchResponse.summary.applied_filters || {}).length }} filter(s)
@@ -192,10 +200,7 @@
           </div>
 
           <!-- Inline Feedback Section -->
-          <div
-            v-if="searchResponse?.results?.length && !feedbackGiven"
-            class="flex items-center gap-2"
-          >
+          <div v-if="visibleSearchResults.length && !feedbackGiven" class="flex items-center gap-2">
             <span class="text-ink-gray-6">Helpful?</span>
             <div class="flex items-center gap-1">
               <Tooltip text="Yes, results were helpful">
@@ -219,41 +224,44 @@
           <div v-else-if="feedbackGiven" class="text-ink-gray-6">Thanks for your feedback!</div>
         </div>
 
-        <div class="mt-5 -mx-2.5">
-          <template v-for="item in searchResponse?.results" :key="item.id">
-            <router-link
+        <div class="mt-5 -mx-2.5 pb-20">
+          <List :columns="['auto', 'minmax(0,1fr)']" class="list-row-px-2.5" divider="inset">
+            <ListRow
+              v-for="item in visibleSearchResults"
+              :key="item.id"
               :to="getItemRoute(item)"
-              class="flex space-x-2 overflow-hidden sm:rounded px-2.5 py-3 touch-pan-y select-none transition-colors duration-150 active:bg-surface-gray-2 sm:hover:bg-surface-gray-2"
+              class="py-3 touch-pan-y overflow-hidden"
             >
-              <div>
+              <ListCell class="self-start">
                 <UserAvatarWithHover :user="item.author" />
-              </div>
-              <div class="w-full">
-                <div class="flex items-center">
+              </ListCell>
+              <ListCell class="self-start">
+                <div class="w-full">
+                  <div class="flex items-center">
+                    <div
+                      v-if="item.title"
+                      class="text-base-medium text-ink-gray-9"
+                      v-html="item.title"
+                    />
+                    <div class="text-base-medium text-ink-gray-9" v-else>
+                      {{ $user(item.author).full_name }}
+                    </div>
+                    <span class="px-1 leading-none text-sm text-ink-gray-5">
+                      &middot; {{ item.doctype.replace('GP ', '') }}
+                    </span>
+                    <div class="ml-auto text-sm text-ink-gray-5">
+                      {{ dayjs.unix(item.modified).format('lll') }}
+                    </div>
+                  </div>
                   <div
-                    v-if="item.title"
-                    class="text-base-medium text-ink-gray-9"
-                    v-html="item.title"
-                  />
-                  <div class="text-base-medium text-ink-gray-9" v-else>
-                    {{ $user(item.author).full_name }}
-                  </div>
-                  <span class="px-1 leading-none text-sm text-ink-gray-5">
-                    &middot; {{ item.doctype.replace('GP ', '') }}
-                  </span>
-                  <div class="ml-auto text-sm text-ink-gray-5">
-                    {{ dayjs.unix(item.modified).format('lll') }}
-                  </div>
+                    v-if="item.content"
+                    class="mt-1 text-p-base text-ink-gray-6"
+                    v-html="item.content"
+                  ></div>
                 </div>
-                <div
-                  v-if="item.content"
-                  class="mt-1 text-p-base text-ink-gray-6"
-                  v-html="item.content"
-                ></div>
-              </div>
-            </router-link>
-            <div class="border-b mx-2"></div>
-          </template>
+              </ListCell>
+            </ListRow>
+          </List>
         </div>
       </div>
     </div>
@@ -263,6 +271,8 @@
 import { ref, onMounted, onUnmounted, computed, useTemplateRef } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
+  PageHeader,
+  PageHeaderMobile,
   Avatar,
   Breadcrumbs,
   Button,
@@ -273,13 +283,14 @@ import {
   debounce,
   usePageMeta,
 } from 'frappe-ui'
-import PageHeader from '@/components/PageHeader.vue'
 import { useCall, useNewDoc } from 'frappe-ui'
+import { List, ListCell, ListRow } from 'frappe-ui/list'
 import { GPSearchFeedback } from '@/types/doctypes'
 import { useSessionUser } from '@/data/users'
 import UserAvatarWithHover from '@/components/UserAvatarWithHover.vue'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
-import { activeTeams } from '@/data/teams'
+import { getSpace } from '@/data/spaces'
+import { activeCommunities } from '@/data/communities'
 import { activeUsers } from '@/data/users'
 import { vFocus } from '@/directives'
 
@@ -360,6 +371,9 @@ const searchInput = useTemplateRef<typeof TextInput>('searchInput')
 const router = useRouter()
 const route = useRoute()
 const groupedSpaces = useGroupedSpaceOptions()
+const visibleSearchResults = computed(() => {
+  return (searchResponse.value?.results || []).filter(isSearchResultVisible)
+})
 
 // API Calls Setup
 const search = useCall<SearchResponse, SearchParams>({
@@ -392,11 +406,11 @@ const spacesFilterOptions = computed(() => {
   if (filterOptions.data?.projects) {
     Object.entries(filterOptions.data.projects).forEach(([projectName, count]) => {
       projectCounts.set(projectName, count)
-      // Also handle numeric conversion for project IDs
-      try {
-        projectCounts.set(Number(projectName), count)
-      } catch (e) {
-        // Ignore conversion errors
+      // Project IDs are looked up numerically elsewhere; add a numeric key only
+      // when the name actually parses (Number() returns NaN, it never throws).
+      const numericKey = Number(projectName)
+      if (!Number.isNaN(numericKey)) {
+        projectCounts.set(numericKey, count)
       }
     })
   }
@@ -439,10 +453,10 @@ const teamsFilterOptions = computed(() => {
     })
   }
 
-  return activeTeams.value.map((team) => ({
-    value: team.name,
-    label: team.title,
-    count: teamCounts.get(team.name) || 0,
+  return activeCommunities.value.map((community) => ({
+    value: community.name,
+    label: community.title,
+    count: teamCounts.get(community.name) || 0,
   }))
 })
 
@@ -504,11 +518,34 @@ const tagsFilterOptions = computed(() => {
 
 // Keyboard shortcut handler
 function handleKeyPress(event: KeyboardEvent) {
-  // Focus search input when "/" is pressed
-  if (event.key === '/' && !isInputFocused()) {
-    event.preventDefault()
-    searchInput.value?.el?.focus()
+  if (isInputFocused()) {
+    return
   }
+
+  if (event.key === '/') {
+    event.preventDefault()
+    focusSearchInput()
+    return
+  }
+
+  if (!isSearchCharacter(event)) {
+    return
+  }
+
+  event.preventDefault()
+  focusSearchInput()
+  newSearch.value = true
+  updateQuery(`${query.value}${event.key}`)
+}
+
+function focusSearchInput() {
+  searchInput.value?.el?.focus()
+}
+
+function isSearchCharacter(event: KeyboardEvent) {
+  return (
+    event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey
+  )
 }
 
 function isInputFocused() {
@@ -625,7 +662,7 @@ function removeFilter(type: keyof SearchFilters, value: string) {
 
 // Search State Persistence
 function getStorageKey(query: string) {
-  return `${STORAGE_KEY_PREFIX}${query}`
+  return `${STORAGE_KEY_PREFIX}${useSessionUser().name}:${query}`
 }
 
 function loadSearchState(searchQuery: string) {
@@ -673,6 +710,7 @@ function getItemRoute(item: SearchResultItem) {
       return {
         name: 'Discussion',
         params: {
+          communityId: item.team || getSpace(item.project)?.team,
           spaceId: item.project,
           postId: item.name,
         },
@@ -684,6 +722,7 @@ function getItemRoute(item: SearchResultItem) {
       return {
         name: 'SpaceTask',
         params: {
+          communityId: item.team || getSpace(item.project)?.team,
           spaceId: item.project,
           taskId: item.name,
         },
@@ -692,6 +731,7 @@ function getItemRoute(item: SearchResultItem) {
       return {
         name: 'SpacePage',
         params: {
+          communityId: item.team || getSpace(item.project)?.team,
           spaceId: item.project,
           pageId: item.name,
         },
@@ -701,6 +741,7 @@ function getItemRoute(item: SearchResultItem) {
         return {
           name: 'Discussion',
           params: {
+            communityId: item.team || getSpace(item.project)?.team,
             spaceId: item.project,
             postId: item.reference_name,
           },
@@ -711,6 +752,7 @@ function getItemRoute(item: SearchResultItem) {
         return {
           name: 'SpaceTask',
           params: {
+            communityId: item.team || getSpace(item.project)?.team,
             spaceId: item.project,
             taskId: item.reference_name,
           },
@@ -721,6 +763,16 @@ function getItemRoute(item: SearchResultItem) {
     default:
       return {}
   }
+}
+
+function isSearchResultVisible(item: SearchResultItem) {
+  if (!item.project) return true
+
+  // Search spans every community the user can access, joined or not — the backend
+  // already filters results by permission. Only hide results from archived spaces;
+  // if the space isn't in the local cache, still show it (the server allowed it).
+  const space = getSpace(item.project)
+  return !space || !space.archived_at
 }
 
 // Feedback System
@@ -738,7 +790,8 @@ function submitFeedback(isHelpful: boolean) {
 </script>
 <style>
 mark {
-  background-color: theme('colors.amber.100');
+  background-color: var(--surface-amber-2);
+  color: var(--ink-gray-8);
   font-weight: 500;
 }
 </style>

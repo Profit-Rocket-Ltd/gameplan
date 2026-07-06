@@ -1,17 +1,28 @@
 <template>
   <div>
-    <PageHeader>
+    <PageHeaderMobile class="sm:hidden" :title="taskTitle">
+      <template #left>
+        <PageHeaderBackButton :to="backRoute" :label="isSpaceTask ? 'Tasks' : 'My Tasks'" />
+      </template>
+    </PageHeaderMobile>
+    <PageHeader class="hidden sm:flex">
       <SpaceBreadcrumbs
         v-if="space"
         :spaceId="space.name"
         :items="[
           {
             label: 'Tasks',
-            route: { name: 'SpaceTasks' },
+            route: {
+              name: 'SpaceTasks',
+              params: { communityId: space?.team, spaceId: space?.name },
+            },
           },
           {
             label: task.doc ? task.doc.title : route.params.taskId.toString(),
-            route: { name: 'Task' },
+            route: {
+              name: 'SpaceTask',
+              params: { communityId: space?.team, spaceId: space?.name, taskId: props.taskId },
+            },
           },
         ]"
       />
@@ -25,7 +36,7 @@
           },
           {
             label: task.doc ? task.doc.title : route.params.taskId.toString(),
-            route: { name: 'Task' },
+            route: { name: 'Task', params: { taskId: props.taskId } },
           },
         ]"
       />
@@ -36,18 +47,44 @@
   </div>
 </template>
 <script setup lang="ts">
-import { useRoute } from 'vue-router'
-import { Breadcrumbs, usePageMeta } from 'frappe-ui'
-import PageHeader from '@/components/PageHeader.vue'
+import { computed } from 'vue'
+import { useRoute, type RouteLocationRaw } from 'vue-router'
+import {
+  PageHeaderBackButton,
+  PageHeaderMobile,
+  PageHeader,
+  Breadcrumbs,
+  usePageMeta,
+} from 'frappe-ui'
 import SpaceBreadcrumbs from '@/components/SpaceBreadcrumbs.vue'
 import TaskDetail from '@/components/TaskDetail.vue'
 import { useTask } from '@/data/tasks'
 import { useSpace } from '@/data/spaces'
 
-const props = defineProps<{ taskId: string }>()
+const props = defineProps<{
+  communityId?: string
+  spaceId?: string
+  taskId: string
+}>()
 const task = useTask(() => props.taskId)
-const space = useSpace(() => task.doc?.project)
+const space = useSpace(() => task.doc?.project || props.spaceId)
 const route = useRoute()
+
+const taskTitle = computed(() => task.doc?.title || 'Task')
+const isSpaceTask = computed(() => Boolean(space.value || props.spaceId))
+const backRoute = computed<RouteLocationRaw>(() => {
+  const spaceId = space.value?.name || props.spaceId
+  const communityId = space.value?.team || props.communityId
+
+  if (spaceId && communityId) {
+    return {
+      name: 'SpaceTasks',
+      params: { communityId, spaceId },
+    }
+  }
+
+  return { name: 'MyTasks' }
+})
 
 usePageMeta(() => {
   return {

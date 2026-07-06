@@ -1,30 +1,17 @@
 <template>
   <div>
-    <PageHeader>
+    <PageHeaderMobile class="sm:hidden" title="Pages">
+      <template #left>
+        <PageHeaderBackButton :to="{ name: 'More' }" />
+      </template>
+      <template #right>
+        <Select :options="sortOptions" v-model="orderBy" />
+      </template>
+    </PageHeaderMobile>
+    <PageHeader class="hidden sm:flex">
       <Breadcrumbs class="h-7" :items="[{ label: 'My Pages', route: { name: 'MyPages' } }]" />
       <div class="flex items-center space-x-2">
-        <Select
-          :options="[
-            {
-              label: 'Sort by',
-              value: '',
-              disabled: true,
-            },
-            {
-              label: 'Page Title',
-              value: 'title asc',
-            },
-            {
-              label: 'Date Updated',
-              value: 'modified desc',
-            },
-            {
-              label: 'Date Created',
-              value: 'creation desc',
-            },
-          ]"
-          v-model="orderBy"
-        />
+        <Select :options="sortOptions" v-model="orderBy" />
       </div>
     </PageHeader>
 
@@ -43,8 +30,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Select, Breadcrumbs } from 'frappe-ui'
-import PageHeader from '@/components/PageHeader.vue'
+import { PageHeaderBackButton, PageHeaderMobile, PageHeader, Select, Breadcrumbs } from 'frappe-ui'
 import { useNewDoc } from 'frappe-ui'
 import { useSessionUser } from '@/data/users'
 import PageGrid from './PageGrid.vue'
@@ -54,6 +40,13 @@ import { UseListOptions } from 'frappe-ui'
 const router = useRouter()
 const sessionUser = useSessionUser()
 const orderBy: UseListOptions<GPPage>['orderBy'] = ref('modified desc')
+
+const sortOptions = [
+  { label: 'Sort by', value: '', disabled: true },
+  { label: 'Page Title', value: 'title asc' },
+  { label: 'Date Updated', value: 'modified desc' },
+  { label: 'Date Created', value: 'creation desc' },
+]
 
 const newPage = useNewDoc<GPPage>('GP Page', {
   title: 'Untitled',

@@ -1,26 +1,30 @@
 <template>
   <div class="body-container mt-5">
+    <SpaceHeaderActions placement="title">
+      <DropdownMoreOptions
+        v-if="!isBulkMoveMode"
+        label="Space actions"
+        align="start"
+        :options="spaceActions"
+      />
+    </SpaceHeaderActions>
     <SpaceHeaderActions>
-      <template v-if="!isBulkMoveMode">
-        <DropdownMoreOptions
-          align="end"
-          :options="[
-            {
-              label: 'Move discussions',
-              icon: 'lucide-log-out',
-              onClick: () => (isBulkMoveMode = true),
-            },
-          ]"
-        />
+      <template v-if="canEditSpace && !isBulkMoveMode">
         <Button
           variant="solid"
           icon-left="lucide-plus"
-          @click="router.push({ name: 'NewDiscussion', query: { spaceId: spaceId } })"
+          @click="
+            router.push({
+              name: 'NewDiscussion',
+              params: { communityId: route.params.communityId },
+              query: { spaceId: spaceId },
+            })
+          "
         >
           Add new
         </Button>
       </template>
-      <template v-else>
+      <template v-else-if="isBulkMoveMode">
         <Button variant="ghost" @click="cancelBulkMove">Cancel</Button>
         <Button
           variant="solid"
@@ -46,8 +50,7 @@
       :filters="() => ({ project: spaceId })"
       :cacheKey="`SpaceDiscussions-${spaceId}`"
       :selectable="isBulkMoveMode"
-      :selectedDiscussions="selectedDiscussions"
-      @toggle-selection="toggleSelection"
+      v-model:selectedDiscussions="selectedDiscussions"
     />
     <Dialog
       title="Move discussions to another space"
@@ -75,18 +78,33 @@
         </Button>
       </template>
     </Dialog>
+    <SpaceAccessDialog v-model="showSpaceAccessDialog" :spaceId="spaceId" />
   </div>
 </template>
 <script setup lang="ts">
 import { computed, ref, useTemplateRef } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Combobox, Dialog, ErrorMessage, useCall, toast } from 'frappe-ui'
 import DiscussionList from '@/components/DiscussionList.vue'
 import SpaceHeaderActions from '@/components/SpaceHeaderActions.vue'
 import SpaceTabs from '@/components/SpaceTabs.vue'
 import DropdownMoreOptions from '@/components/DropdownMoreOptions.vue'
+import SpaceAccessDialog from '@/components/SpaceAccessDialog.vue'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
-import { useSpace, spaces } from '@/data/spaces'
+import { useCommunity } from '@/data/communities'
+import { useSessionUser } from '@/data/users'
+import { canManageCommunity } from '@/utils/permissions'
+import { showCommunitiesSettings } from '@/components/Settings'
+import {
+  useSpace,
+  useSpacePermissions,
+  spaces,
+  markAllAsRead,
+  archiveSpace,
+  unarchiveSpace,
+} from '@/data/spaces'
+import { copyToClipboard } from '@/utils'
+import { readOnlyMode } from '@/data/readOnlyMode'
 
 interface BulkUpdateResponse {
   moved: string[]
@@ -100,12 +118,71 @@ const props = defineProps<{
   spaceId: string
 }>()
 
+const route = useRoute()
 const isBulkMoveMode = ref(false)
 const selectedDiscussions = ref<string[]>([])
 const showMoveDialog = ref(false)
 const selectedSpace = ref<string | null>(null)
 const discussionListRef = useTemplateRef('discussionListRef')
 const router = useRouter()
+const {
+  space: currentSpace,
+  isArchived,
+  canEditSpace,
+  canManageAccess,
+} = useSpacePermissions(() => props.spaceId)
+const showSpaceAccessDialog = ref(false)
+
+// The space's community, so the "Settings" shortcut can jump to its Spaces admin
+// and be gated by community-manage permission (mirrors "Manage spaces" elsewhere).
+const sessionUser = useSessionUser()
+const community = useCommunity(() => currentSpace.value?.team)
+const canManageCurrentCommunity = computed(() => canManageCommunity(community.value, sessionUser))
+
+const spaceActions = computed(() => [
+  {
+    label: 'Settings',
+    icon: 'lucide-settings',
+    onClick: () => showCommunitiesSettings(currentSpace.value?.team, 'spaces'),
+    condition: () => canManageCurrentCommunity.value,
+  },
+  {
+    label: 'Copy link',
+    icon: 'lucide-link',
+    onClick: () => copyToClipboard(window.location.href),
+  },
+  {
+    label: 'Mark all as read',
+    icon: 'lucide-check',
+    onClick: () => currentSpace.value && markAllAsRead([props.spaceId], currentSpace.value.title),
+  },
+  {
+    label: 'Manage access',
+    icon: 'lucide-users',
+    onClick: () => (showSpaceAccessDialog.value = true),
+    condition: () => canManageAccess.value,
+  },
+  {
+    label: 'Move discussions',
+    icon: 'lucide-log-out',
+    onClick: () => (isBulkMoveMode.value = true),
+    condition: () => canEditSpace.value,
+  },
+  {
+    label: 'Archive',
+    icon: 'lucide-archive',
+    onClick: () => currentSpace.value && archiveSpace(currentSpace.value),
+    // Archiving is destructive — gate it behind manage access, mirroring Unarchive, so a
+    // regular member isn't offered (and can't submit) an action they lack permission for.
+    condition: () => canEditSpace.value && canManageAccess.value,
+  },
+  {
+    label: 'Unarchive',
+    icon: 'lucide-archive-restore',
+    onClick: () => currentSpace.value && unarchiveSpace(currentSpace.value),
+    condition: () => !readOnlyMode && isArchived.value && canManageAccess.value,
+  },
+])
 const selectedSpaceTitle = computed(() => {
   return selectedSpace.value ? useSpace(selectedSpace.value).value?.title : ''
 })
@@ -122,14 +199,6 @@ const bulkMoveDiscussions = useCall<
   method: 'POST',
   immediate: false,
 })
-
-function toggleSelection(name: string) {
-  if (selectedDiscussions.value.includes(name)) {
-    selectedDiscussions.value = selectedDiscussions.value.filter((value) => value !== name)
-  } else {
-    selectedDiscussions.value.push(name)
-  }
-}
 
 function cancelBulkMove() {
   isBulkMoveMode.value = false

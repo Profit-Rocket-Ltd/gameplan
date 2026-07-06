@@ -1,24 +1,44 @@
 <template>
-  <PageHeader>
+  <PageHeaderMobile class="sm:hidden" title="Drafts">
+    <template #left>
+      <Button v-if="isBulkDeleteMode" variant="ghost" size="md" @click="cancelBulkDelete">
+        Cancel
+      </Button>
+      <PageHeaderBackButton v-else :to="{ name: 'More' }" />
+    </template>
+    <template #right>
+      <Button
+        v-if="!isBulkDeleteMode"
+        v-show="drafts.data?.length"
+        variant="ghost"
+        size="md"
+        @click="isBulkDeleteMode = true"
+      >
+        Select
+      </Button>
+      <Button
+        v-else
+        variant="subtle"
+        theme="red"
+        size="md"
+        :disabled="selectedDrafts.length === 0"
+        @click="showDeleteConfirm = true"
+      >
+        Delete{{ selectedDrafts.length ? ` ${selectedDrafts.length}` : '' }}
+      </Button>
+    </template>
+  </PageHeaderMobile>
+  <PageHeader class="hidden sm:flex">
     <Breadcrumbs class="h-7" :items="[{ label: 'Drafts', route: { name: 'Drafts' } }]" />
     <div class="flex items-center gap-2">
       <template v-if="!isBulkDeleteMode">
-        <DropdownMoreOptions
-          align="end"
-          :options="[
-            {
-              label: 'Delete drafts',
-              icon: 'lucide-trash-2',
-              onClick: () => (isBulkDeleteMode = true),
-            },
-          ]"
-        />
         <Button
-          icon-left="lucide-plus"
-          variant="solid"
-          @click="router.push({ name: 'NewDiscussion' })"
+          v-show="drafts.data?.length"
+          variant="ghost"
+          icon-left="lucide-square-check"
+          @click="isBulkDeleteMode = true"
         >
-          Add new
+          Select
         </Button>
       </template>
       <template v-else>
@@ -41,44 +61,28 @@
         No drafts
       </EmptyStateBox>
       <div class="-mx-3" v-else>
-        <template v-for="(draft, index) in drafts.data" :key="draft.name">
-          <RouterLink
-            :to="{ name: 'NewDiscussion', query: { draft: draft.name } }"
-            custom
-            v-slot="{ href, navigate }"
+        <List
+          :selectable="isBulkDeleteMode"
+          v-model:selection="selectedDrafts"
+          divider="inset"
+          class="list-gap-4"
+        >
+          <ListRow
+            v-for="draft in drafts.data"
+            :key="draft.name"
+            :to="draftRoute(draft)"
+            :value="draft.name"
+            class="h-15"
           >
-            <a
-              :href="href"
-              class="flex items-center py-2 px-3 group relative h-15 rounded-[10px] transition hover:bg-surface-gray-2 cursor-pointer"
-              @click="handleDraftRowClick($event, navigate, draft.name)"
-            >
-              <motion.div
-                class="flex shrink-0 items-center overflow-hidden"
-                :animate="{ width: isBulkDeleteMode ? 32 : 0 }"
-                :transition="{ type: 'spring', stiffness: 700, damping: 48, mass: 0.5 }"
-              >
-                <AnimatePresence>
-                  <motion.div
-                    v-if="isBulkDeleteMode"
-                    class="flex items-center"
-                    role="checkbox"
-                    :aria-checked="selectedDrafts.includes(draft.name)"
-                    tabindex="0"
-                    :initial="{ scale: 0 }"
-                    :animate="{ scale: 1 }"
-                    :exit="{ scale: 0 }"
-                    :transition="{ duration: 0.08, ease: 'easeOut' }"
-                    @click.stop="toggleSelection(draft.name)"
-                    @keydown.enter.prevent="toggleSelection(draft.name)"
-                    @keydown.space.prevent="toggleSelection(draft.name)"
-                  >
-                    <Checkbox :modelValue="selectedDrafts.includes(draft.name)" />
-                  </motion.div>
-                </AnimatePresence>
-              </motion.div>
+            <ListCell>
               <UserAvatarWithHover :user="draft.owner" size="2xl" />
-              <div class="ml-4 flex-1 min-w-0">
-                <div class="flex items-center min-w-0">
+            </ListCell>
+            <ListCell>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center min-w-0 gap-1.5">
+                  <Tooltip v-if="draft.kind === 'comment'" text="Reply draft">
+                    <span class="lucide-reply h-4 w-4 shrink-0 text-ink-gray-5" />
+                  </Tooltip>
                   <span
                     class="overflow-hidden text-ellipsis whitespace-nowrap text-ink-gray-8 text-base-medium"
                   >
@@ -89,10 +93,10 @@
                   <div
                     class="overflow-hidden text-ellipsis whitespace-nowrap text-base inline-flex items-center text-ink-gray-5"
                   >
-                    <div v-if="draft.project_title" class="inline-flex items-center">
-                      <span>{{ draft.project_title }}</span>
+                    <div v-if="draft.space_title" class="inline-flex items-center">
+                      <span>{{ draft.space_title }}</span>
                       <span
-                        v-if="isSpacePrivate(draft.project)"
+                        v-if="draft.is_private"
                         class="lucide-lock h-3 w-3 text-ink-gray-6 ml-0.5"
                       />
                       <span>:&nbsp;</span>
@@ -103,20 +107,16 @@
                   </div>
                 </div>
               </div>
-              <div class="ml-auto shrink-0">
-                <Tooltip :text="dayjsLocal(draft.modified).format('D MMM YYYY [at] h:mm A')">
-                  <div class="shrink-0 whitespace-nowrap text-sm text-ink-gray-5 text-right">
-                    {{ relativeTimestamp(draft.modified) }}
-                  </div>
-                </Tooltip>
-              </div>
-            </a>
-          </RouterLink>
-          <div
-            class="mx-3 h-px border-t border-outline-elevation-2 transition-opacity group-hover:opacity-0"
-            v-if="index < (drafts.data?.length || 0) - 1"
-          ></div>
-        </template>
+            </ListCell>
+            <ListCell class="justify-end">
+              <Tooltip :text="dayjsLocal(draft.modified).format('D MMM YYYY [at] h:mm A')">
+                <div class="shrink-0 whitespace-nowrap text-sm text-ink-gray-5 text-right">
+                  {{ relativeTimestamp(draft.modified) }}
+                </div>
+              </Tooltip>
+            </ListCell>
+          </ListRow>
+        </List>
       </div>
     </div>
   </div>
@@ -137,28 +137,41 @@
 </template>
 <script setup lang="ts">
 import {
+  PageHeaderBackButton,
+  PageHeaderMobile,
+  PageHeader,
   Tooltip,
   dayjsLocal,
   Breadcrumbs,
   Button,
-  Checkbox,
   Dialog,
   useCall,
   toast,
 } from 'frappe-ui'
-import { GPDraft } from '@/types/doctypes'
-import { useList } from 'frappe-ui'
+import { List, ListRow, ListCell } from 'frappe-ui/list'
 import UserAvatarWithHover from '@/components/UserAvatarWithHover.vue'
-import { useSpace } from '@/data/spaces'
 import { relativeTimestamp } from '@/utils'
-import PageHeader from '@/components/PageHeader.vue'
-import { ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { motion, AnimatePresence } from 'motion-v'
-import DropdownMoreOptions from '@/components/DropdownMoreOptions.vue'
+import { onMounted, ref } from 'vue'
+import type { RouteLocationRaw } from 'vue-router'
+import { recoverOrphanedDrafts } from '@/data/useDraftSync'
+import { session } from '@/data/session'
 
-interface Draft extends GPDraft {
-  project_title: string
+/** A row from `get_my_drafts` — a new-discussion draft or a new-comment draft on a
+ *  discussion, already resolved to everything needed to render and route it. */
+interface DraftRow {
+  name: string
+  kind: 'discussion' | 'comment'
+  owner: string
+  title: string | null
+  content: string | null
+  modified: string
+  creation: string
+  space: string | null
+  space_title: string | null
+  community: string | null
+  is_private: boolean | number
+  /** For comment drafts, the parent discussion to open; null for discussion drafts. */
+  discussion: string | null
 }
 
 interface DeleteDraftsResponse {
@@ -172,32 +185,47 @@ interface DeleteDraftsResponse {
 const isBulkDeleteMode = ref(false)
 const selectedDrafts = ref<string[]>([])
 const showDeleteConfirm = ref(false)
-const router = useRouter()
 
-function toggleSelection(name: string) {
-  if (selectedDrafts.value.includes(name)) {
-    selectedDrafts.value = selectedDrafts.value.filter((n) => n !== name)
-  } else {
-    selectedDrafts.value.push(name)
+// Comment drafts always open their parent discussion with the reply composer focused
+// (?draft=comment) — never the new-discussion composer, which would resurface a saved reply
+// as a brand-new discussion. Discussion drafts open the scoped composer; those without a
+// resolvable community fall back to the unscoped route.
+function draftRoute(draft: DraftRow): RouteLocationRaw {
+  if (draft.kind === 'comment' && draft.discussion && draft.space) {
+    // When the community resolved server-side, route fully scoped. Otherwise use the
+    // space-scoped path and let the router fill in the community — so the reply still opens
+    // in place (and its content is never silently rerouted into a new discussion).
+    if (draft.community) {
+      return {
+        name: 'Discussion',
+        params: {
+          communityId: draft.community,
+          spaceId: draft.space,
+          postId: draft.discussion,
+        },
+        query: { draft: 'comment' },
+      }
+    }
+    return {
+      path: `/space/${draft.space}/discussion/${draft.discussion}`,
+      query: { draft: 'comment' },
+    }
+  }
+
+  if (!draft.community) {
+    return { name: 'LegacyNewDiscussion', query: { draft: draft.name } }
+  }
+
+  return {
+    name: 'NewDiscussion',
+    params: { communityId: draft.community },
+    query: { draft: draft.name },
   }
 }
 
 function cancelBulkDelete() {
   isBulkDeleteMode.value = false
   selectedDrafts.value = []
-}
-
-function handleDraftRowClick(
-  event: MouseEvent,
-  navigate: (event?: MouseEvent) => void,
-  draftName: string,
-) {
-  if (isBulkDeleteMode.value) {
-    event.preventDefault()
-    toggleSelection(draftName)
-    return
-  }
-  navigate(event)
 }
 
 let deleteDraftsCall = useCall<DeleteDraftsResponse, { names: string[] }>({
@@ -241,34 +269,28 @@ function deleteDrafts() {
     })
 }
 
-let drafts = useList<Draft>({
-  doctype: 'GP Draft',
-  filters: {
-    type: 'Discussion',
-  },
-  fields: [
-    'name',
-    'title',
-    'content',
-    'project',
-    'project.title as project_title',
-    'creation',
-    'modified',
-    'owner',
-  ],
-  orderBy: 'creation desc',
-  cacheKey: 'drafts',
+// One enriched, route-ready feed of the user's new drafts — discussions and comment
+// replies alike. The backend resolves comment drafts' parent discussion + space, which
+// the bare GP Draft row can't express, so the client just renders and routes.
+let drafts = useCall<DraftRow[]>({
+  url: '/api/v2/method/gameplan.gameplan.doctype.gp_draft.gp_draft.get_my_drafts',
+  // get_my_drafts is owner-scoped on the server; scope the client cache to the session user
+  // too, so a same-tab account switch can't briefly show the previous user's draft rows.
+  cacheKey: ['drafts', session.user],
+  immediate: true,
 })
 
-function contentPreview(content?: string) {
+// Drafts whose server row never got created (a push that never landed) live only in
+// IndexedDB and would otherwise never show here. Adopt them on open, then refresh.
+onMounted(async () => {
+  const recovered = await recoverOrphanedDrafts()
+  if (recovered > 0) drafts.reload()
+})
+
+function contentPreview(content?: string | null) {
   if (content) {
     // remove html tags
     return content.replace(/<[^>]*>?/gm, '').slice(0, 100)
   }
-}
-
-function isSpacePrivate(spaceId?: string) {
-  if (!spaceId) return false
-  return useSpace(spaceId).value?.is_private
 }
 </script>

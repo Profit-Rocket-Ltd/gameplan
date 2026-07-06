@@ -17,10 +17,18 @@
       <div :class="{ hidden: !(isOpen[group.title] ?? true) }">
         <div v-for="(d, index) in group.tasks" :key="d.name">
           <router-link
-            :to="{
-              name: d.project ? 'SpaceTask' : 'Task',
-              params: { spaceId: d.project, taskId: d.name },
-            }"
+            :to="
+              d.project
+                ? {
+                    name: 'SpaceTask',
+                    params: {
+                      communityId: d.team || getSpace(d.project)?.team,
+                      spaceId: d.project,
+                      taskId: d.name,
+                    },
+                  }
+                : { name: 'Task', params: { taskId: d.name } }
+            "
             class="flex h-15 w-full items-center rounded p-2.5 transition hover:bg-surface-gray-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3 group"
             :class="{
               'pointer-events-none': tasks.delete.loading && tasks.delete.params.name === d.name,
@@ -104,7 +112,7 @@
               </div>
             </div>
             <div class="sm:invisible group-hover:visible">
-              <DropdownMoreOptions :options="dropdownOptions(d.name)" align="end" />
+              <DropdownMoreOptions :options="dropdownOptions(d)" align="end" />
             </div>
           </router-link>
           <div class="mx-2.5 border-b" v-if="index < group.tasks.length - 1"></div>
@@ -129,8 +137,11 @@ import EmptyStateBox from './EmptyStateBox.vue'
 import TaskStatusIcon from './NewTaskDialog/TaskStatusIcon.vue'
 import { useList } from 'frappe-ui'
 import { GPTask } from '@/types/doctypes'
+import { getSpace } from '@/data/spaces'
 import { UseListOptions } from 'frappe-ui'
 import DropdownMoreOptions from './DropdownMoreOptions.vue'
+import { useSessionUser } from '@/data/users'
+import { canDeleteContent } from '@/utils/permissions'
 
 interface Props {
   groupByStatus?: boolean
@@ -210,15 +221,16 @@ const groupedTasks = computed(() => {
   )
 })
 
-function dropdownOptions(name: string) {
+function dropdownOptions(task: GPTask) {
   return [
     {
       label: 'Delete',
+      condition: () => canDeleteContent(task, getSpace(task.project), useSessionUser()),
       onClick: () => {
         dialog.danger({
           title: 'Delete Task',
           message: 'Are you sure you want to delete this task?',
-          onConfirm: () => tasks.delete.submit({ name }),
+          onConfirm: () => tasks.delete.submit({ name: task.name }),
         })
       },
     },

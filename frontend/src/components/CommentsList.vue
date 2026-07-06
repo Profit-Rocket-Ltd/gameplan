@@ -20,7 +20,7 @@
       </div>
     </div>
     <div class="px-1">
-      <template v-for="item in timelineItems" :key="item.doctype + item.name">
+      <template v-for="(item, i) in timelineItems" :key="item.doctype + item.name">
         <div
           v-if="newMessagesFrom && newMessagesFrom == item.name"
           class="relative my-4"
@@ -35,8 +35,12 @@
         </div>
         <Comment
           v-if="item.doctype == 'GP Comment'"
+          :class="{
+            'pt-14 sm:pt-0': needsMobileCommentGap(timelineItems, i),
+          }"
           :ref="($comment) => setItemRef($comment, item)"
           :comment="item"
+          :space="space"
           :highlight="highlightedItem == item"
           :readOnlyMode="readOnlyMode"
           :comments="comments"
@@ -46,14 +50,18 @@
     </div>
 
     <div v-if="!readOnlyMode && !disableNewComment" class="px-1 pb-4 pt-12" ref="addComment">
-      <div class="flex items-start">
+      <div
+        class="flex items-start"
+        :class="!showCommentBox ? 'cursor-pointer' : ''"
+        @click="openCommentBoxFromRow"
+      >
         <div class="mr-3 hidden h-8 items-center sm:flex">
           <UserAvatar :user="$user().name" size="md" />
         </div>
         <div class="relative w-full" v-show="!showCommentBox">
           <button
             class="flex w-full items-center rounded-md border px-2 py-2 text-left text-base text-ink-gray-5 hover:border-outline-gray-3"
-            @click="showCommentBox = true"
+            @click.stop="openCommentBox"
           >
             Add a comment
           </button>
@@ -72,7 +80,7 @@
           </div>
           <CommentEditor
             ref="newCommentEditor"
-            :value="newComment"
+            :value="draftData.content"
             @change="onNewCommentChange"
             :submitButtonProps="{
               variant: 'solid',
@@ -86,27 +94,33 @@
             :editable="showCommentBox"
             placeholder="Add a comment"
           />
+          <ErrorMessage :message="comments.insert.error" />
         </div>
       </div>
     </div>
   </div>
 </template>
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useList } from 'frappe-ui'
+import { ErrorMessage, useList } from 'frappe-ui'
 import CommentEditor from '@/components/editor/CommentEditor.vue'
 import Comment from './Comment.vue'
 import Activity from './Activity.vue'
 import UserAvatar from './UserAvatar.vue'
-import { getScrollContainer } from '@/utils/scrollContainer'
+import { getScrollContainer } from 'frappe-ui'
+import { needsMobileCommentGap } from '@/utils/commentTimeline'
 import { dialog } from 'frappe-ui'
-import { useSocket } from '@/socket'
+import { useSocket, type NewActivityEvent } from '@/socket'
 import { GPActivity, GPComment } from '@/types/doctypes'
+import type { Space } from '@/data/spaces'
+import { useDraftSync } from '@/data/useDraftSync'
 
 interface Props {
   doctype: string
   name: string
+  // Space the thread belongs to, for community-admin delete moderation.
+  space?: Space | null
   newCommentsFrom?: string
   readOnlyMode?: boolean
   disableNewComment?: boolean
@@ -122,7 +136,20 @@ const route = useRoute()
 const socket = useSocket()
 
 const showCommentBox = ref(false)
-const newComment = ref(localStorage.getItem(draftCommentKey()) || '')
+
+// Auto-saved draft for the new-comment composer, keyed to this task. Survives reloads
+// and restores across tabs. One draft per (user, task).
+const draft = useDraftSync({
+  identity: () => ({
+    type: 'Comment',
+    mode: 'New',
+    referenceDoctype: props.doctype,
+    referenceName: props.name,
+  }),
+  initialPayload: () => ({ content: '' }),
+})
+const draftData = draft.data
+
 const newMessagesFrom = ref(props.newCommentsFrom)
 const highlightedItem = ref(null)
 const newCommentEditor = ref(null)
@@ -280,21 +307,24 @@ const timelineItems = computed(() => {
 })
 
 const commentEmpty = computed(() => {
-  return !newComment.value || newComment.value === '<p></p>'
+  return !draftData.value.content || draftData.value.content === '<p></p>'
 })
 
 const editorObject = computed(() => {
   return newCommentEditor.value?.editor
 })
 
-// Methods
-function draftCommentKey(): string {
-  return `draft-comment-${props.doctype}-${props.name}`
+function openCommentBox() {
+  showCommentBox.value = true
+}
+
+function openCommentBoxFromRow() {
+  if (!showCommentBox.value) {
+    openCommentBox()
+  }
 }
 
 function resetCommentState() {
-  localStorage.removeItem(draftCommentKey())
-  newComment.value = ''
   showCommentBox.value = false
   highlightedItem.value = null
 }
@@ -315,6 +345,7 @@ async function scrollToItem(item) {
 
 function scrollToElement($el: HTMLElement) {
   const scrollContainer = getScrollContainer()
+  if (!scrollContainer) return
   const headerHeight = 64
   const top = $el.offsetTop - scrollContainer.scrollTop - headerHeight
   scrollContainer.scrollBy({ top, left: 0, behavior: 'smooth' })
@@ -322,45 +353,44 @@ function scrollToElement($el: HTMLElement) {
 
 function scrollToEnd() {
   const scrollContainer = getScrollContainer()
+  if (!scrollContainer) return
   scrollContainer.scrollTop = scrollContainer.scrollHeight
 }
 
 // Add these functions after the existing methods
-function discardComment() {
+async function discardComment() {
   if (!editorObject.value?.isEmpty) {
     dialog.danger({
       title: 'Discard comment',
       message: 'Are you sure you want to discard your comment?',
       confirmLabel: 'Discard comment',
-      onConfirm: resetCommentState,
+      onConfirm: async () => {
+        await draft.clear()
+        resetCommentState()
+      },
     })
   } else {
+    await draft.clear()
     resetCommentState()
   }
 }
 
-function submitComment() {
-  if (commentEmpty.value) {
-    return
-  }
+async function submitComment() {
+  if (commentEmpty.value || comments.insert.loading) return
 
-  comments.insert
-    .submit({
-      reference_doctype: props.doctype,
-      reference_name: props.name,
-      content: newComment.value,
-    })
-    .then(() => {
-      resetCommentState()
-    })
+  const comment = await comments.insert.submit({
+    reference_doctype: props.doctype,
+    reference_name: props.name,
+    content: draftData.value.content,
+  })
+  if (comments.insert.error || !comment?.name) return
+
+  await draft.commit()
+  resetCommentState()
 }
 
 function onNewCommentChange(content: string) {
-  newComment.value = content
-  // save draft comment to local storage
-  setTimeout(() => {
-    localStorage.setItem(draftCommentKey(), content)
-  }, 0)
+  draftData.value.content = content
 }
 
 function setItemRef($component: any, item: any) {
@@ -378,13 +408,16 @@ watch(showCommentBox, (val) => {
   }
 })
 
-onMounted(() => {
-  if (!newCommentEditor.value?.editor.isEmpty) {
-    showCommentBox.value = true
-  }
-})
+// Reopen the composer if a saved draft is restored for this task.
+watch(
+  () => draft.ready.value,
+  (ready) => {
+    if (ready && draft.restored.value) showCommentBox.value = true
+  },
+  { immediate: true },
+)
 
-socket.on('new_activity', (data) => {
+socket.on('new_activity', (data: NewActivityEvent) => {
   if (data.reference_doctype === props.doctype && data.reference_name === props.name) {
     activities.reload()
   }

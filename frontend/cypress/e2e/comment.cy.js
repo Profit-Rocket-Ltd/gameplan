@@ -22,6 +22,10 @@ describe('Comment', () => {
       .as('data')
       .then((data) => {
         let project = data[1]
+        // Scoped routes (and legacy redirects into them) only resolve a joined community.
+        cy.request('POST', '/api/v2/method/GP Team/update_joined_teams', {
+          teams: ['engineering'],
+        })
         cy.request('POST', '/api/method/frappe.client.insert', {
           doc: {
             doctype: 'GP Discussion',
@@ -46,7 +50,11 @@ describe('Comment', () => {
       times: 1,
     }).as('comment')
     cy.button('Add a comment').click()
-    cy.focused().type('This is the first comment{enter}')
+    // Click the editor to settle focus before typing — relying on the auto-focus
+    // via cy.focused() races the just-mounted ProseMirror view and drops the
+    // first keystroke. Submit via the button (not {enter}) to avoid a premature
+    // submit of partial text.
+    cy.get('[contenteditable=true]').should('be.visible').click().type('This is the first comment')
     cy.button('Submit').click()
     cy.wait('@comment')
       .its('response.body.data.content')
@@ -63,16 +71,20 @@ describe('Comment', () => {
         cy.get(`div[data-id=${comment.name}] button[aria-label="Add a reaction"]`).click()
         cy.get('button:contains("👍"):visible').click()
         cy.wait('@reactRequest')
-        cy.get('button:contains("👍 1")').should('exist')
+        // The reaction pill separates emoji and count with a non-breaking space,
+        // so match with a regex (\s covers U+00A0) instead of a literal space.
+        cy.contains('button', /👍\s*1/).should('exist')
         cy.get(`div[data-id=${comment.name}]`).contains('Edited').should('not.exist')
 
         // remove a reaction
         cy.get(`div[data-id=${comment.name}] button[aria-label="Add a reaction"]`).click()
         cy.get('button:contains("💖"):visible').click()
         cy.wait('@reactRequest')
-        cy.get('button:contains("💖 1")').should('exist').click()
+        cy.contains('button', /💖\s*1/)
+          .should('exist')
+          .click()
         cy.wait('@reactRequest')
-        cy.get('button:contains("💖 1")').should('not.exist')
+        cy.contains('button', /💖\s*1/).should('not.exist')
 
         // edit comment
         cy.selectDropdownOption('Comment Options', 'Edit')

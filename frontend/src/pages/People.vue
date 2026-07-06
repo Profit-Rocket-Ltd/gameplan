@@ -2,7 +2,22 @@
   <div class="flex h-full flex-col">
     <div class="flex flex-1">
       <div class="w-full">
-        <PageHeader>
+        <PageHeaderMobile class="sm:hidden" title="People">
+          <template #left>
+            <PageHeaderBackButton :to="{ name: 'More' }" />
+          </template>
+          <template #right>
+            <Button
+              v-if="isAdmin"
+              variant="ghost"
+              size="md"
+              icon="lucide-user-plus-2"
+              label="Invite"
+              @click="showSettingsDialog('Users')"
+            />
+          </template>
+        </PageHeaderMobile>
+        <PageHeader class="hidden sm:flex">
           <Breadcrumbs :items="[{ label: 'People', route: { name: 'People' } }]" />
           <div class="h-7"></div>
         </PageHeader>
@@ -28,6 +43,7 @@
                   { label: 'Last updated', value: 'modified desc' },
                   { label: 'Posts', value: 'posts' },
                   { label: 'Replies', value: 'replies' },
+                  { label: 'Reactions received', value: 'reactions_received' },
                 ]"
                 v-model="orderBy"
               >
@@ -36,9 +52,11 @@
                 </template>
               </Select>
               <Button
+                v-if="isAdmin"
+                class="hidden sm:inline-flex"
                 variant="solid"
                 icon-left="lucide-user-plus-2"
-                @click="showSettingsDialog('Invites')"
+                @click="showSettingsDialog('Users')"
               >
                 Invite
               </Button>
@@ -58,20 +76,47 @@
             </TextInput>
           </div>
           <div class="mt-4 pb-16 -mx-3">
-            <template v-for="user in people" :key="user.name">
-              <router-link
+            <!-- Desktop: header + numeric columns. The avatar gets its own track so
+                 the inset divider starts at the name text (grid line 2). -->
+            <List
+              class="max-sm:hidden list-gap-3"
+              :columns="['2.5rem', 'minmax(8rem,1fr)', '6.25rem', '6.25rem', '6.25rem', '6.25rem']"
+              divider="inset"
+            >
+              <!-- px-3 matches the interactive rows' default horizontal padding. -->
+              <ListHeader class="px-3">
+                <ListHeaderCell class="col-span-2">Member</ListHeaderCell>
+                <ListHeaderCell class="justify-end">Posts</ListHeaderCell>
+                <ListHeaderCell class="justify-end">Replies</ListHeaderCell>
+                <ListHeaderCell class="justify-end">
+                  <template #prefix>
+                    <ReactionFaceIcon class="size-4 text-ink-gray-5" aria-hidden="true" />
+                  </template>
+                  Received
+                </ListHeaderCell>
+                <ListHeaderCell class="justify-end">
+                  <template #prefix>
+                    <ReactionFaceIcon class="size-4 text-ink-gray-5" aria-hidden="true" />
+                  </template>
+                  Given
+                </ListHeaderCell>
+              </ListHeader>
+              <ListRow
+                v-for="user in people"
+                :key="user.name"
                 :to="{
-                  name: 'PersonProfile',
+                  name: 'PersonProfileProfile',
                   params: {
                     personId: user.name,
                   },
                 }"
-                class="flex sm:rounded px-3 py-2 sm:h-15 sm:hover:bg-surface-gray-2 duration-150 active:bg-surface-gray-2 transition-colors"
-                exact-active-class="!bg-surface-gray-2"
+                class="h-15"
               >
-                <div class="flex w-full sm:w-3/5 items-center">
+                <ListCell>
                   <UserAvatarWithHover :user="user.user" size="2xl" />
-                  <div class="ml-3 min-w-0">
+                </ListCell>
+                <ListCell>
+                  <div class="min-w-0 flex-1">
                     <div class="flex items-center space-x-2">
                       <div class="text-base-medium text-ink-gray-8">
                         {{ $user(user.user).full_name }}
@@ -84,16 +129,9 @@
                     >
                       {{ user.bio }}
                     </div>
-                    <div
-                      class="sm:hidden mt-1.5 flex items-center space-x-1 text-base text-ink-gray-5"
-                    >
-                      <span>{{ user.discussions_count }} posts</span>
-                      <span class="text-ink-gray-4">&middot;</span>
-                      <span>{{ user.comments_count }} replies</span>
-                    </div>
                   </div>
-                </div>
-                <div class="hidden sm:flex w-1/5 items-center justify-end text-right">
+                </ListCell>
+                <ListCell class="justify-end">
                   <router-link
                     class="text-base text-ink-gray-5 hover:text-ink-gray-8"
                     :to="{
@@ -102,12 +140,10 @@
                     }"
                     @click.prevent
                   >
-                    {{ user.discussions_count }} posts
+                    {{ user.discussions_count }}
                   </router-link>
-                </div>
-                <div
-                  class="hidden sm:flex w-1/5 items-center justify-end text-right text-base text-ink-gray-5"
-                >
+                </ListCell>
+                <ListCell class="justify-end">
                   <router-link
                     class="text-base text-ink-gray-5 hover:text-ink-gray-8"
                     :to="{
@@ -116,12 +152,63 @@
                     }"
                     @click.prevent
                   >
-                    {{ user.comments_count }} replies
+                    {{ user.comments_count }}
                   </router-link>
-                </div>
-              </router-link>
-              <div class="mx-2 border-b"></div>
-            </template>
+                </ListCell>
+                <ListCell class="justify-end text-base text-ink-gray-5">
+                  {{ user.reactions_received }}
+                </ListCell>
+                <ListCell class="justify-end text-base text-ink-gray-5">
+                  {{ user.reactions_given }}
+                </ListCell>
+              </ListRow>
+            </List>
+
+            <!-- Mobile: avatar + details, stats inline under the name. The avatar
+                 track keeps the inset divider starting at the name text. -->
+            <List
+              class="sm:hidden list-gap-3"
+              :columns="['2.5rem', 'minmax(0,1fr)']"
+              divider="inset"
+            >
+              <ListRow
+                v-for="user in people"
+                :key="user.name"
+                :to="{
+                  name: 'PersonProfileProfile',
+                  params: {
+                    personId: user.name,
+                  },
+                }"
+                class="py-2"
+              >
+                <ListCell>
+                  <UserAvatarWithHover :user="user.user" size="2xl" />
+                </ListCell>
+                <ListCell>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center space-x-2">
+                      <div class="text-base-medium text-ink-gray-8">
+                        {{ $user(user.user).full_name }}
+                      </div>
+                      <Badge v-if="$user(user.user).isGuest">Guest</Badge>
+                    </div>
+                    <div
+                      v-if="user.bio"
+                      class="mt-1.5 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-base text-ink-gray-5"
+                    >
+                      {{ user.bio }}
+                    </div>
+                    <div class="mt-1.5 flex items-center space-x-1 text-base text-ink-gray-5">
+                      <span>{{ user.discussions_count }} posts</span>
+                      <span class="text-ink-gray-4">&middot;</span>
+                      <span>{{ user.comments_count }} replies</span>
+                    </div>
+                  </div>
+                </ListCell>
+              </ListRow>
+            </List>
+
             <div class="p-3" v-if="$resources.profiles.hasNextPage">
               <Button
                 @click="$resources.profiles.next()"
@@ -137,15 +224,44 @@
   </div>
 </template>
 <script>
-import { Breadcrumbs, Badge, Input, Select, TextInput } from 'frappe-ui'
-import PageHeader from '@/components/PageHeader.vue'
+import { computed } from 'vue'
+import {
+  PageHeaderBackButton,
+  PageHeaderMobile,
+  PageHeader,
+  Breadcrumbs,
+  Badge,
+  Button,
+  Input,
+  Select,
+  TextInput,
+} from 'frappe-ui'
+import { List, ListCell, ListHeader, ListHeaderCell, ListRow } from 'frappe-ui/list'
 import { showSettingsDialog } from '@/components/Settings'
+import { isGameplanAdmin } from '@/data/users'
 import UserAvatarWithHover from '@/components/UserAvatarWithHover.vue'
+import ReactionFaceIcon from '@/components/ReactionFaceIcon.vue'
 
 export default {
   name: 'People',
   props: ['person'],
-  components: { Badge, Input, TextInput, Select, Breadcrumbs, PageHeader },
+  components: {
+    Badge,
+    Button,
+    Input,
+    TextInput,
+    Select,
+    Breadcrumbs,
+    PageHeaderBackButton,
+    PageHeaderMobile,
+    PageHeader,
+    ReactionFaceIcon,
+    List,
+    ListCell,
+    ListHeader,
+    ListHeaderCell,
+    ListRow,
+  },
   data() {
     return {
       search: '',
@@ -155,12 +271,13 @@ export default {
   setup() {
     return {
       showSettingsDialog,
+      isAdmin: computed(() => isGameplanAdmin()),
     }
   },
   resources: {
     profiles() {
       let orderBy = this.orderBy
-      if (['posts', 'replies'].includes(orderBy)) {
+      if (['posts', 'replies', 'reactions_received'].includes(orderBy)) {
         orderBy = 'modified desc'
       }
       return {
@@ -195,17 +312,21 @@ export default {
         list = list.sort((a, b) => b.discussions_count - a.discussions_count)
       } else if (this.orderBy == 'replies') {
         list = list.sort((a, b) => b.comments_count - a.comments_count)
+      } else if (this.orderBy == 'reactions_received') {
+        list = list.sort((a, b) => b.reactions_received - a.reactions_received)
       }
       return list
     },
     profiles() {
-      return (this.$resources.profiles.data || []).map((profile) => {
-        return {
-          ...profile,
-          email: this.$user(profile.user).email,
-          full_name: this.$user(profile.user).full_name,
-        }
-      })
+      return (this.$resources.profiles.data || [])
+        .filter((profile) => this.$user(profile.user).isNotGuest)
+        .map((profile) => {
+          return {
+            ...profile,
+            email: this.$user(profile.user).email,
+            full_name: this.$user(profile.user).full_name,
+          }
+        })
     },
   },
   methods: {

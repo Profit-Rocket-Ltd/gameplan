@@ -6,11 +6,17 @@ import inspect
 import re
 from functools import wraps
 from html import unescape
-from urllib.parse import unquote, urlparse
+from typing import NamedTuple
+from urllib.parse import parse_qs, unquote, urlparse
 
 import frappe
 from bleach import clean
 from bs4 import BeautifulSoup
+
+
+class FileReference(NamedTuple):
+	file_url: str
+	file_name: str | None = None
 
 
 def validate_url(url):
@@ -53,21 +59,41 @@ def extract_file_urls(html):
 	The path is unquoted so the editor's `?fid=<File.name>` query and %-encoding are
 	dropped, matching how Frappe stores File.file_url (it unquotes on insert).
 	"""
+	return list({reference.file_url for reference in extract_file_references(html)})
+
+
+def extract_file_references(html):
+	"""Return local Frappe file references from HTML content.
+
+	When the editor includes `?fid=<File.name>`, keep it so attachment repair can
+	target the exact File row instead of every row that shares the same file_url.
+	"""
 	if not html:
 		return []
 	soup = BeautifulSoup(html, "html.parser")
-	paths = set()
+	references = set()
 	for tag in soup.find_all(["img", "a", "video", "source"]):
 		raw = tag.get("src") or tag.get("href")
 		if not raw:
 			continue
 		parsed = urlparse(raw)
-		if parsed.scheme or parsed.netloc:
+		if not is_same_origin_file_url(parsed):
 			continue
 		path = unquote(parsed.path)
 		if path.startswith(("/files/", "/private/files/")):
-			paths.add(path)
-	return list(paths)
+			fid = parse_qs(parsed.query).get("fid", [None])[0]
+			references.add(FileReference(path, fid))
+	return list(references)
+
+
+def is_same_origin_file_url(parsed):
+	if not parsed.scheme and not parsed.netloc:
+		return True
+	if parsed.scheme not in ("http", "https"):
+		return False
+
+	site_url = urlparse(frappe.utils.get_url())
+	return parsed.netloc == site_url.netloc
 
 
 def remove_empty_trailing_paragraphs(html):

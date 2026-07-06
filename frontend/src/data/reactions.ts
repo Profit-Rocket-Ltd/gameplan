@@ -1,6 +1,7 @@
 import { computed, reactive, unref, toValue } from 'vue'
 import type { MaybeRefOrGetter } from 'vue'
 import { useCall } from 'frappe-ui'
+import { currentQuickReactionEmojis } from './reactionPreferences'
 import { session } from './session'
 import { useUser } from './users'
 
@@ -33,29 +34,6 @@ interface UseReactionsOptions {
   readOnlyMode?: MaybeRefOrGetter<boolean>
   onUpdate: (reactions: Reaction[]) => void
 }
-
-const standardEmojis = [
-  '👍',
-  '👎',
-  '💖',
-  '🔥',
-  '👏🏻',
-  '🤔',
-  '😱',
-  '🤯',
-  '😡',
-  '⚡️',
-  '🥳',
-  '🎉',
-  '💩',
-  '🤩',
-  '😢',
-  '😂',
-  '🍿',
-  '🙈',
-  '🌚',
-  '🚀',
-]
 
 export function useReactions(options: UseReactionsOptions) {
   const pendingReactions = reactive<Record<string, PendingReaction>>({})
@@ -197,10 +175,16 @@ export function useReactions(options: UseReactionsOptions) {
       .join(', ')
 
   const batchRequestErrors = computed(() => {
-    if (!react.error) {
+    const error = react.error
+    // A rapid second reaction makes useFetch abort the still-in-flight first
+    // request (it calls abort() at the start of every execute). That surfaces a
+    // DOMException "signal is aborted without reason". The cancelled operations
+    // aren't lost — they stay in pendingReactions (cleared only on success) and
+    // are resent in the next batch — so an abort isn't a real failure to report.
+    if (!error || error.name === 'AbortError') {
       return []
     }
-    const message = react.error?.message || 'Unable to update reactions'
+    const message = error.message || 'Unable to update reactions'
     return [message]
   })
 
@@ -208,7 +192,7 @@ export function useReactions(options: UseReactionsOptions) {
     reactionsCount,
     toggleReaction,
     toolTipText,
-    standardEmojis,
+    standardEmojis: currentQuickReactionEmojis,
     batchRequestErrors,
     isLoading: react.loading,
   }

@@ -7,14 +7,31 @@ import frappe
 import requests
 from bs4 import BeautifulSoup
 from frappe.model.document import Document
-from pypika.terms import ExistsCriterion
 
-import gameplan
-from gameplan.api import invite_by_email
+from gameplan.api import _invite_by_email
 from gameplan.gameplan.doctype.gp_unread_record.gp_unread_record import GPUnreadRecord
-from gameplan.gemoji import get_random_gemoji
 from gameplan.mixins.archivable import Archivable
 from gameplan.mixins.manage_members import ManageMembersMixin
+from gameplan.permissions import (
+	apply_accessible_project_filter,
+	apply_project_query_filter,
+	can_view_space,
+	require_can_invite_guest,
+	require_can_manage_space_members,
+)
+
+DEFAULT_SPACE_ICON = "lucide-hash"
+PROJECT_TEAM_DOCTYPES = [
+	"GP Discussion",
+	"GP Draft",
+	"GP Followed Project",
+	"GP Guest Access",
+	"GP Notification",
+	"GP Page",
+	"GP Pinned Project",
+	"GP Project Visit",
+	"GP Task",
+]
 
 
 class GPProject(ManageMembersMixin, Archivable, Document):
@@ -30,57 +47,17 @@ class GPProject(ManageMembersMixin, Archivable, Document):
 
 	@staticmethod
 	def get_list_query(query):
-		Project = frappe.qb.DocType("GP Project")
-		Member = frappe.qb.DocType("GP Member")
-		member_exists = (
-			frappe.qb.from_(Member)
-			.select(Member.name)
-			.where(Member.parenttype == "GP Project")
-			.where(Member.parent == Project.name)
-			.where(Member.user == frappe.session.user)
-		)
-		query = query.where(
-			(Project.is_private == 0) | ((Project.is_private == 1) & ExistsCriterion(member_exists))
-		)
-		if gameplan.is_guest():
-			GuestAccess = frappe.qb.DocType("GP Guest Access")
-			project_list = GuestAccess.select(GuestAccess.project).where(
-				GuestAccess.user == frappe.session.user
-			)
-			query = query.where(Project.name.isin(project_list))
-
-		return query
-
-	@staticmethod
-	def get_list(query):
-		Project = frappe.qb.DocType("GP Project")
-		Member = frappe.qb.DocType("GP Member")
-		member_exists = (
-			frappe.qb.from_(Member)
-			.select(Member.name)
-			.where(Member.parenttype == "GP Project")
-			.where(Member.parent == Project.name)
-			.where(Member.user == frappe.session.user)
-		)
-		query = query.where(
-			(Project.is_private == 0) | ((Project.is_private == 1) & ExistsCriterion(member_exists))
-		)
-		if gameplan.is_guest():
-			GuestAccess = frappe.qb.DocType("GP Guest Access")
-			project_list = GuestAccess.select(GuestAccess.project).where(
-				GuestAccess.user == frappe.session.user
-			)
-			query = query.where(Project.name.isin(project_list))
-
-		return query
+		return apply_project_query_filter(query)
 
 	def as_dict(self, *args, **kwargs) -> dict:
 		d = super().as_dict(*args, **kwargs)
 		return d
 
+	def before_validate(self):
+		if not self.icon or not self.icon.startswith("lucide-"):
+			self.icon = DEFAULT_SPACE_ICON
+
 	def before_insert(self):
-		if not self.icon:
-			self.icon = get_random_gemoji().emoji
 		self.append("members", {"user": frappe.session.user})
 
 	def on_trash(self):
@@ -100,11 +77,11 @@ class GPProject(ManageMembersMixin, Archivable, Document):
 			return
 		self.team = team
 		self.save()
-		for doctype in ["GP Task", "GP Discussion"]:
-			for name in frappe.db.get_all(doctype, {"project": self.name}, pluck="name"):
-				doc = frappe.get_doc(doctype, name)
-				doc.team = self.team
-				doc.save()
+		self.update_project_team_references()
+
+	def update_project_team_references(self):
+		for doctype in PROJECT_TEAM_DOCTYPES:
+			update_project_team_reference(doctype, self.name, self.team)
 
 	@frappe.whitelist()
 	def merge_with_project(self, project=None):
@@ -118,10 +95,14 @@ class GPProject(ManageMembersMixin, Archivable, Document):
 
 	@frappe.whitelist()
 	def invite_guest(self, email):
-		invite_by_email(email, role="Gameplan Guest", projects=[self.name])
+		require_can_invite_guest(self)
+		# Trusted path: a space member invites a guest to this space. The role is
+		# hardcoded (non-escalating), so it bypasses invite_by_email's admin gate.
+		_invite_by_email(email, role="Gameplan Guest", projects=[self.name])
 
 	@frappe.whitelist()
 	def remove_guest(self, email):
+		require_can_invite_guest(self)
 		name = frappe.db.get_value("GP Guest Access", {"project": self.name, "user": email})
 		if name:
 			frappe.delete_doc("GP Guest Access", name)
@@ -150,26 +131,29 @@ class GPProject(ManageMembersMixin, Archivable, Document):
 		)
 
 	@frappe.whitelist()
-	def follow(self):
-		if not self.is_followed:
-			frappe.get_doc(doctype="GP Followed Project", project=self.name).insert(ignore_permissions=True)
-
-	@frappe.whitelist()
-	def unfollow(self):
-		follow_id = frappe.db.get_value(
-			"GP Followed Project", {"project": self.name, "user": frappe.session.user}
-		)
-		frappe.delete_doc("GP Followed Project", follow_id)
-
-	@frappe.whitelist()
 	def add_member(self, user):
-		if user not in [d.user for d in self.members]:
-			self.append("members", {"user": user})
-			self.save()
+		require_can_manage_space_members(self)
+		self.add_member_row(user)
+
+	@frappe.whitelist()
+	def remove_member(self, user):
+		require_can_manage_space_members(self)
+		for member in self.members:
+			if member.user == user:
+				self.remove(member)
+				self.save(ignore_permissions=True)
+				break
 
 	@frappe.whitelist()
 	def join(self):
-		self.add_member(frappe.session.user)
+		if not can_view_space(frappe.session.user, self):
+			frappe.throw("Not permitted", frappe.PermissionError)
+		self.add_member_row(frappe.session.user)
+
+	def add_member_row(self, user):
+		if user not in [d.user for d in self.members]:
+			self.append("members", {"user": user})
+			self.save(ignore_permissions=True)
 
 	@frappe.whitelist()
 	def leave(self):
@@ -177,7 +161,7 @@ class GPProject(ManageMembersMixin, Archivable, Document):
 		for member in self.members:
 			if member.user == user:
 				self.remove(member)
-				self.save()
+				self.save(ignore_permissions=True)
 				break
 
 	@frappe.whitelist()
@@ -187,7 +171,7 @@ class GPProject(ManageMembersMixin, Archivable, Document):
 		for pin in frappe.db.get_all(
 			"GP Pinned Project", filters={"project": self.name, "user": frappe.session.user}, pluck="name"
 		):
-			frappe.delete_doc("GP Pinned Project", pin.name, ignore_permissions=True)
+			frappe.delete_doc("GP Pinned Project", pin, ignore_permissions=True)
 
 	@frappe.whitelist()
 	def mark_all_as_read(self):
@@ -246,6 +230,42 @@ def get_joined_spaces():
 
 
 @frappe.whitelist()
+def get_activity():
+	from frappe.query_builder.functions import Max
+
+	activity_by_project = {}
+	for doctype, timestamp_field in [
+		("GP Discussion", "last_post_at"),
+		("GP Task", "modified"),
+		("GP Page", "modified"),
+	]:
+		DocType = frappe.qb.DocType(doctype)
+		project = DocType.project
+		timestamp = getattr(DocType, timestamp_field)
+		query = (
+			frappe.qb.from_(DocType)
+			.select(project, Max(timestamp).as_("last_activity_at"))
+			.where(project.isnotnull())
+			.groupby(project)
+		)
+		query = apply_accessible_project_filter(query, project)
+
+		for row in query.run(as_dict=True):
+			project_name = str(row.project)
+			last_activity_at = row.last_activity_at
+			current_activity_at = activity_by_project.get(project_name, "")
+			if last_activity_at and str(last_activity_at) > str(current_activity_at):
+				activity_by_project[project_name] = last_activity_at
+
+	return activity_by_project
+
+
+def update_project_team_reference(doctype: str, project: str, team: str | None):
+	DocType = frappe.qb.DocType(doctype)
+	(frappe.qb.update(DocType).set(DocType.team, team).where(DocType.project == str(project))).run()
+
+
+@frappe.whitelist(methods=["POST"])
 def join_spaces(spaces: list[str] = None):
 	if not spaces:
 		return
@@ -253,7 +273,7 @@ def join_spaces(spaces: list[str] = None):
 		frappe.get_doc("GP Project", space).join()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def leave_spaces(spaces: list[str] = None):
 	if not spaces:
 		return
@@ -261,7 +281,7 @@ def leave_spaces(spaces: list[str] = None):
 		frappe.get_doc("GP Project", space).leave()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def mark_all_as_read(spaces: list[str] = None):
 	"""Mark all unread discussions as read for multiple spaces at once."""
 	if not spaces:

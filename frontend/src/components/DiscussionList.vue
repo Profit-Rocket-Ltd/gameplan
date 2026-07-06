@@ -5,36 +5,38 @@
         <Pin class="h-4 w-4 text-ink-gray-4" />
         <span class="text-ink-gray-8 text-base"> Pinned </span>
       </div>
-      <DiscussionRow
-        v-for="(discussion, index) of pinnedDiscussions.data"
-        :key="discussion.name"
-        :discussion="discussion"
-        :index="Number(index)"
-        :total="pinnedDiscussions.data.length"
-        :showSpaceName="!filters || !filters.project"
-        :selectable="selectable"
-        :selected="selectedDiscussions.includes(discussion.name)"
-        @toggle-selection="toggleSelection"
-      />
+      <List :selectable="selectable" v-model:selection="selectedDiscussions" :class="listClass">
+        <DiscussionRow
+          v-for="discussion of pinnedDiscussions.data"
+          :key="discussion.name"
+          :discussion="discussion"
+          :showSpaceName="!filters || !filters.project"
+        />
+      </List>
     </div>
 
-    <DiscussionRow
-      v-for="(discussion, i) of discussions.data"
-      :key="discussion.name"
-      :discussion="discussion"
-      :index="Number(i)"
-      :total="discussions.data?.length || 0"
-      :showSpaceName="!filters || !filters.project"
-      :selectable="selectable"
-      :selected="selectedDiscussions.includes(discussion.name)"
-      @toggle-selection="toggleSelection"
-    />
+    <template v-if="isInitialLoading">
+      <DiscussionRowSkeleton
+        v-for="index in skeletonRowCount"
+        :key="index"
+        :show-separator="index < skeletonRowCount"
+      />
+    </template>
+
+    <List :selectable="selectable" v-model:selection="selectedDiscussions" :class="listClass">
+      <DiscussionRow
+        v-for="discussion of discussions.data"
+        :key="discussion.name"
+        :discussion="discussion"
+        :showSpaceName="!filters || !filters.project"
+      />
+    </List>
     <div class="px-2 sm:px-0">
       <EmptyStateBox class="mx-3" v-if="!discussions.loading && discussions.data?.length === 0">
         <span class="lucide-coffee h-7 w-7 text-ink-gray-4" />
         No discussions
       </EmptyStateBox>
-      <div class="flex items-center justify-center p-3" v-if="discussions.hasNextPage">
+      <div class="flex items-center justify-center p-3" v-if="showLoadMoreButton">
         <Button
           icon-left="lucide-refresh-cw"
           @click="discussions.next"
@@ -50,9 +52,12 @@
 <script setup lang="ts">
 import { computed, toValue } from 'vue'
 import type { OrderBy } from 'frappe-ui'
+import { List } from 'frappe-ui/list'
 import { UseDiscussionOptions, useDiscussions } from '@/data/discussions'
 import DiscussionRow from './DiscussionRow.vue'
+import DiscussionRowSkeleton from './DiscussionRowSkeleton.vue'
 import EmptyStateBox from './EmptyStateBox.vue'
+import Pin from './icons/Pin.vue'
 
 interface Props {
   filters: UseDiscussionOptions['filters']
@@ -60,18 +65,18 @@ interface Props {
   cacheKey?: string
   showPinned?: boolean
   selectable?: boolean
-  selectedDiscussions?: string[]
 }
 
 const props = withDefaults(defineProps<Props>(), {
   showPinned: true,
   selectable: false,
-  selectedDiscussions: () => [],
 })
 
-const emit = defineEmits<{
-  (e: 'toggle-selection', name: string): void
-}>()
+const selectedDiscussions = defineModel<string[]>('selectedDiscussions', { default: () => [] })
+
+// Match the hand-rolled DiscussionRow geometry: 12px gap + 16px row padding
+// on mobile, 16px gap + the default 12px padding on desktop.
+const listClass = 'max-sm:list-gap-3 sm:list-gap-4 max-sm:list-row-px-4'
 
 const discussions = useDiscussions({
   filters: props.filters,
@@ -83,21 +88,18 @@ const pinnedDiscussions = useDiscussions({
   filters: () => {
     const baseFilters = toValue(props.filters)
 
-    // If viewing a specific space (project filter exists)
     if (baseFilters?.project) {
-      // Show only space-scoped pins for this specific project
       return {
         ...baseFilters,
         pinned_at: ['is', 'set'],
         pin_scope: 'Space',
       }
-    } else {
-      // When viewing all discussions/global view, show only global pins
-      return {
-        ...baseFilters,
-        pinned_at: ['is', 'set'],
-        pin_scope: 'Global',
-      }
+    }
+
+    return {
+      ...baseFilters,
+      pinned_at: ['is', 'set'],
+      pin_scope: 'Category',
     }
   },
   orderBy: 'pinned_at desc' as OrderBy,
@@ -107,10 +109,9 @@ const pinnedDiscussions = useDiscussions({
 })
 
 const filters = computed(() => toValue(props.filters))
-
-function toggleSelection(name: string) {
-  emit('toggle-selection', name)
-}
+const skeletonRowCount = 3
+const isInitialLoading = computed(() => discussions.loading && !discussions.data?.length)
+const showLoadMoreButton = computed(() => discussions.hasNextPage && !isInitialLoading.value)
 
 defineExpose({ discussions, pinnedDiscussions })
 </script>

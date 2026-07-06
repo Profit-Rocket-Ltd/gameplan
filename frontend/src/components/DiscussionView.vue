@@ -1,9 +1,26 @@
 <template>
   <div class="relative flex h-full flex-col" v-if="postId">
+    <PageHeaderMobile class="sm:hidden" :title="mobileHeaderTitle">
+      <template #left>
+        <PageHeaderBackButton :to="backRoute" />
+      </template>
+    </PageHeaderMobile>
+    <PageHeader class="hidden sm:flex">
+      <SpaceBreadcrumbs
+        class="flex"
+        :spaceId="currentSpaceId"
+        :items="[{ label: discussion.doc?.title || postId, onClick: scrollToTop }]"
+      />
+    </PageHeader>
     <div class="discussion-container">
       <div v-if="discussion.loading">
-        <div class="pb-2 pt-14 flex w-full items-center sticky top-0 z-[1] bg-surface-base">
-          <Avatar size="lg" label="A" class="mr-3 animate-pulse shrink-0">
+        <div
+          class="sticky -top-px z-[1] flex w-full items-center bg-surface-base pb-2 pt-2 sm:top-0 sm:pt-14"
+        >
+          <Avatar size="xl" label="A" class="mr-3 shrink-0 animate-pulse sm:hidden">
+            <div></div>
+          </Avatar>
+          <Avatar size="lg" label="A" class="mr-3 hidden shrink-0 animate-pulse sm:inline-flex">
             <div></div>
           </Avatar>
           <div class="flex flex-col md:block">
@@ -26,21 +43,40 @@
         </div>
       </div>
       <template v-else-if="discussion.doc">
-        <div>
-          <div class="pb-2 pt-14 flex w-full items-center sticky top-0 z-[1] bg-surface-base">
+        <div
+          :class="{
+            'rounded-lg border mt-14 py-4 px-3 sm:px-5 -mx-3 sm:-mx-5 focus-within:border-outline-gray-3':
+              editingPost,
+          }"
+          @keydown.ctrl.enter.capture.stop="updatePost"
+          @keydown.meta.enter.capture.stop="updatePost"
+          @keydown.esc="cancelEdit"
+        >
+          <div
+            class="flex w-full items-center bg-surface-base pb-2 pt-2"
+            :class="editingPost ? 'sm:pt-0' : 'sticky -top-px z-[1] sm:top-0 sm:pt-14'"
+          >
             <UserProfileLink class="mr-3" :user="discussion.doc.owner">
-              <UserAvatarWithHover size="lg" :user="discussion.doc.owner" />
+              <UserAvatarWithHover class="sm:hidden" size="xl" :user="discussion.doc.owner" />
+              <UserAvatarWithHover
+                class="hidden sm:inline-flex"
+                size="lg"
+                :user="discussion.doc.owner"
+              />
             </UserProfileLink>
             <div class="flex flex-col md:block">
               <UserProfileLink
-                class="text-base-medium text-ink-gray-8 hover:text-ink-blue-8"
+                class="text-md-medium text-ink-gray-8 hover:text-ink-blue-8 sm:text-base-medium"
                 :user="discussion.doc.owner"
               >
                 {{ $user(discussion.doc.owner).full_name }}
                 <span class="hidden md:inline text-ink-gray-7">&nbsp;&middot;&nbsp;</span>
               </UserProfileLink>
               <Tooltip :text="dayjsLocal(discussion.doc.creation).format('D MMM YYYY [at] h:mm A')">
-                <time class="text-base text-ink-gray-5" :datetime="discussion.doc.creation">
+                <time
+                  class="text-p-base text-ink-gray-5 sm:text-base"
+                  :datetime="discussion.doc.creation"
+                >
                   {{ dayjsLocal(discussion.doc.creation).fromNow() }}
                 </time>
               </Tooltip>
@@ -61,7 +97,7 @@
           </div>
           <div :class="{ 'pb-4 mt-1': !editingPost }">
             <div class="flex items-start justify-between space-x-1">
-              <h1 v-if="!editingPost" class="flex items-center text-4xl-semibold">
+              <h1 v-if="!editingPost" class="flex items-center text-4xl-semibold" ref="postTitleEl">
                 <Tooltip v-if="discussion.doc.closed_at" text="This discussion is closed">
                   <span class="lucide-lock mr-2 h-4 w-4 text-ink-gray-6" />
                 </Tooltip>
@@ -84,50 +120,33 @@
               </template>
             </div>
           </div>
-          <div
-            :class="{
-              'rounded-lg border p-4 focus-within:border-outline-gray-3': editingPost,
-            }"
-            ref="mainPostContentEl"
-          >
+          <div ref="mainPostContentEl">
             <div v-if="editingPost" class="w-full">
               <div class="mb-2">
                 <input
                   v-if="editingPost"
                   type="text"
-                  class="w-full rounded border-0 text-ink-gray-8 px-0 py-0.5 text-4xl-semibold focus:ring-0"
+                  class="w-full bg-transparent border-0 text-ink-gray-8 px-0 py-0.5 text-4xl-semibold focus:ring-0"
                   ref="title"
-                  v-model="discussion.doc.title"
+                  v-model="postDraftData.title"
                   placeholder="Title"
-                  v-focus
                 />
               </div>
             </div>
-            <CommentEditor
-              :value="discussion.doc.content"
-              :quote-source-id="`discussion:${discussion.doc.name}`"
-              @change="discussion.doc.content = $event"
-              @rich-quote="
-                handleRichQuote($event, {
-                  id: `discussion:${discussion.doc.name}`,
-                  author: discussion.doc.owner,
-                })
-              "
-              :submitButtonProps="{
-                variant: 'solid',
-                onClick: updatePost,
-                loading: discussion.setValue.loading,
-              }"
-              :discardButtonProps="{
-                onClick: () => {
-                  editingPost = false
-                  discussion.reload()
-                },
-              }"
+            <DiscussionViewEditor
+              ref="postEditor"
+              :content="editingPost ? postDraftData.content : discussion.doc.content"
               :editable="editingPost"
+              :saving="discussion.setValue.loading"
+              :can-save="canSavePost"
+              :quote-source-id="`discussion:${discussion.doc.name}`"
+              :author="discussion.doc.owner"
+              @change="onPostEditorChange"
+              @save="updatePost"
+              @discard="cancelEdit"
             />
           </div>
-          <div class="mt-3">
+          <div class="mt-3" v-show="!editingPost">
             <Reactions
               doctype="GP Discussion"
               :name="discussion.doc.name"
@@ -139,14 +158,14 @@
         <CommentsArea
           doctype="GP Discussion"
           :name="discussion.doc.name"
+          :space="space"
           :newCommentsFrom="discussion.doc.last_unread_comment?.toString()"
           :read-only-mode="readOnlyMode"
           :disable-new-comment="Boolean(discussion.doc.closed_at)"
-          @rich-quote="handleRichQuote"
-          @rich-quote-click="handleRichQuoteClick"
+          :hide-new-comment="editingPost"
           ref="commentsArea"
         />
-        <QuoteBacklinksPopover :store="quoteBacklinks" @select="scrollToQuotingComment" />
+        <QuoteBacklinksPopover :store="richQuotes" @select="scrollToQuotingComment" />
         <Dialog
           title="Move discussion to another space"
           @close="
@@ -185,7 +204,7 @@
           @close="
             () => {
               pinDialog.show = false
-              pinDialog.pinGlobally = false
+              pinDialog.pinToCategory = false
             }
           "
           v-model:open="pinDialog.show"
@@ -197,13 +216,13 @@
           <div class="space-y-2">
             <label class="flex items-center justify-between">
               <div>
-                <div class="text-base-medium text-ink-gray-9 mb-1">Pin Globally</div>
-                <div class="text-sm text-ink-gray-5" v-if="pinDialog.pinGlobally">
-                  Show in all discussions
+                <div class="text-base-medium text-ink-gray-9 mb-1">Pin to Community</div>
+                <div class="text-sm text-ink-gray-5" v-if="pinDialog.pinToCategory">
+                  Show in all {{ communityTitle }} discussions
                 </div>
                 <div class="text-sm text-ink-gray-5" v-else>Show in {{ space?.title }} only</div>
               </div>
-              <Switch size="sm" v-model="pinDialog.pinGlobally" />
+              <Switch size="sm" v-model="pinDialog.pinToCategory" />
             </label>
           </div>
           <template #actions>
@@ -215,10 +234,10 @@
                 @click="
                   () => {
                     discussion.pinDiscussion
-                      .submit({ pin_scope: pinDialog.pinGlobally ? 'Global' : 'Space' })
+                      .submit({ pin_scope: pinDialog.pinToCategory ? 'Category' : 'Space' })
                       .then(() => {
                         pinDialog.show = false
-                        pinDialog.pinGlobally = false
+                        pinDialog.pinToCategory = false
                       })
                   }
                 "
@@ -235,9 +254,17 @@
           fieldname="content"
         />
       </template>
+      <EmptyStateBox v-else-if="notFound" class="mx-auto mt-14 max-w-2xl px-6">
+        <LucideTriangleAlert class="mb-3 size-7 text-ink-gray-4" />
+        <div class="text-base text-ink-gray-7">Discussion not found</div>
+        <p class="mt-2 max-w-md text-center text-p-sm text-ink-gray-5">
+          This discussion may have been deleted, or you no longer have access to it. Refresh to try
+          again.
+        </p>
+      </EmptyStateBox>
     </div>
     <div
-      v-if="!isMobile"
+      v-if="!isMobileViewport && !editingPost"
       class="fixed bottom-3 h-9 grid place-content-center right-3 z-[2] print:hidden"
     >
       <Button variant="ghost" v-show="isScrolled" @click="scrollToTop">
@@ -251,9 +278,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, reactive, useTemplateRef } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
 import {
+  ref,
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onMounted,
+  onBeforeUnmount,
+  reactive,
+  watch,
+  useTemplateRef,
+} from 'vue'
+import { useRouter, useRoute, type RouteLocationRaw } from 'vue-router'
+import {
+  PageHeaderBackButton,
+  PageHeaderMobile,
+  PageHeader,
   Combobox,
   Avatar,
   Dropdown,
@@ -265,25 +305,30 @@ import {
   dialog,
 } from 'frappe-ui'
 import { until } from '@vueuse/core'
+import type { Editor } from '@tiptap/vue-3'
 import Reactions from './Reactions.vue'
 import UserAvatarWithHover from './UserAvatarWithHover.vue'
 import CommentsArea from '@/components/CommentsArea.vue'
-import CommentEditor from './editor/CommentEditor.vue'
+import DiscussionViewEditor from './editor/DiscussionViewEditor.vue'
 import UserProfileLink from './UserProfileLink.vue'
-import RevisionsDialog from './RevisionsDialog.vue'
-import { vFocus } from '@/directives'
+// Lazy: htmldiff-js + motion-v only load when a viewer opens edit history.
+const RevisionsDialog = defineAsyncComponent(() => import('./RevisionsDialog.vue'))
+import SpaceBreadcrumbs from './SpaceBreadcrumbs.vue'
+import EmptyStateBox from './EmptyStateBox.vue'
 import { copyToClipboard } from '@/utils'
-import { useSpace } from '@/data/spaces'
+import { getSpace, useSpace } from '@/data/spaces'
+import { useCommunity } from '@/data/communities'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
 import { useDiscussion } from '@/data/discussions'
+import { useDraftSync } from '@/data/useDraftSync'
 import { tags } from '@/data/tags'
-import { useScrollPosition } from '@/utils/scrollContainer'
-import { isMobile } from '@/composables/isMobile'
-import { useRichQuoteHandler } from '@/components/RichQuoteExtension/useRichQuoteHandler'
-import { provideQuoteBacklinks } from '@/components/RichQuoteExtension/useQuoteBacklinks'
+import { useScrollContainer, useIsMobile } from 'frappe-ui'
+import { provideRichQuotes } from '@/components/RichQuoteExtension/useRichQuotes'
 import QuoteBacklinksPopover from '@/components/RichQuoteExtension/QuoteBacklinksPopover.vue'
 import { refreshUnreadCountForProjects } from '@/data/unreadCount'
-import { isSessionUser } from '@/data/session'
+import { useSessionUser } from '@/data/users'
+import { canDeleteContent } from '@/utils/permissions'
+import { useCommandPaletteCommands } from './CommandPalette/registry'
 
 const props = defineProps<{
   postId: string
@@ -292,23 +337,46 @@ const props = defineProps<{
 
 const router = useRouter()
 const route = useRoute()
+const isMobileViewport = useIsMobile()
 const commentsArea = useTemplateRef('commentsArea')
+const postEditor = useTemplateRef<{ editor: Editor | null }>('postEditor')
 const mainPostContentEl = ref<HTMLElement | null>(null)
+const postTitleEl = useTemplateRef<HTMLElement>('postTitleEl')
 
-const { isScrolled, scrollToTop } = useScrollPosition()
-
-const { handleRichQuote, handleRichQuoteClick } = useRichQuoteHandler(
-  commentsArea,
-  mainPostContentEl,
+const { isScrolled, scrollToTop, el: scrollContainerEl } = useScrollContainer()
+const discussion = useDiscussion(() => props.postId)
+// In-app navigation skips the router's server canonicalization for speed, so a stale link to a
+// discussion deleted or moved out of reach after local data loaded would otherwise render a blank
+// detail view. Show a not-found state in place (keeping the URL) rather than redirecting to the
+// NotFound route: the URL stays valid, so refreshing re-runs the load and recovers if access was
+// only transiently denied (e.g. a just-joined community still propagating). Only a definitive
+// missing/forbidden response counts — never a transient network/5xx error, which would wrongly
+// bury a valid discussion.
+const notFound = computed(() => isMissingOrForbidden(discussion.error))
+function isMissingOrForbidden(error: unknown): boolean {
+  // useDoc surfaces a FrappeResponseError whose `type` is the backend exception name (there's no
+  // HTTP status on it). A deleted/never-existed doc is DoesNotExistError; one in a now-inaccessible
+  // space is PermissionError. Anything else (network/5xx) is transient and must NOT bury a valid
+  // discussion behind the not-found state.
+  const type = (error as { type?: string } | null)?.type
+  return type === 'DoesNotExistError' || type === 'PermissionError'
+}
+const showTitleInMobileHeader = ref(false)
+const mobileHeaderTitle = computed(() =>
+  showTitleInMobileHeader.value ? discussion.doc?.title || 'Discussion' : 'Discussion',
 )
 
-const quoteBacklinks = provideQuoteBacklinks()
+const richQuotes = provideRichQuotes()
+richQuotes.setPostContentEl(() => mainPostContentEl.value)
 
 function scrollToQuotingComment(commentId: string) {
   commentsArea.value?.scrollToCommentById(commentId)
 }
 
 const editingPost = ref(false)
+// snapshot of title/content captured when edit mode opens, so we can detect
+// unsaved changes and confirm before discarding them
+const editSnapshot = ref<{ title: string; content: string } | null>(null)
 const discussionMoveDialog = reactive<{
   show: boolean
   project: string | null
@@ -318,25 +386,94 @@ const discussionMoveDialog = reactive<{
 })
 const pinDialog = reactive<{
   show: boolean
-  pinGlobally: boolean
+  pinToCategory: boolean
 }>({
   show: false,
-  pinGlobally: false,
+  pinToCategory: false,
 })
 const showRevisionsDialog = ref(false)
 
-const discussion = useDiscussion(() => props.postId)
+// While the post is being edited, its title/body live in an auto-saved draft instead of
+// being mutated on discussion.doc directly. The draft survives reloads and navigation, and
+// silently restores if the edit is reopened. Dormant until editingPost flips true.
+const postDraft = useDraftSync({
+  identity: () => ({
+    type: 'Discussion',
+    mode: 'Edit',
+    referenceDoctype: 'GP Discussion',
+    referenceName: props.postId,
+  }),
+  enabled: editingPost,
+  initialPayload: () => ({
+    title: discussion.doc?.title ?? '',
+    content: discussion.doc?.content ?? '',
+  }),
+})
+const postDraftData = postDraft.data
+
+function onPostEditorChange(value: string) {
+  if (editingPost.value) postDraftData.value.content = value
+}
+
+// The scroll container is owned by the shell (Desktop/MobileShell) and registers
+// asynchronously — and re-registers across desktop↔mobile layout swaps — so bind the
+// scroll listener reactively as the element becomes available rather than once at mount.
+watch(
+  scrollContainerEl,
+  (el, prev) => {
+    prev?.removeEventListener('scroll', updateMobileHeaderTitle)
+    el?.addEventListener('scroll', updateMobileHeaderTitle)
+    updateMobileHeaderTitle()
+  },
+  { immediate: true },
+)
 
 onMounted(() => {
   scrollToUnread()
 })
 
-async function scrollToUnread() {
-  if (!discussion.doc) {
-    await until(() => discussion.doc).toBeTruthy()
+onBeforeUnmount(() => {
+  scrollContainerEl.value?.removeEventListener('scroll', updateMobileHeaderTitle)
+})
+
+function updateMobileHeaderTitle() {
+  if (!isMobileViewport.value) {
+    showTitleInMobileHeader.value = false
+    return
   }
 
-  updateUrlSlug()
+  const titleElement = postTitleEl.value
+  if (!titleElement || editingPost.value) {
+    showTitleInMobileHeader.value = false
+    return
+  }
+
+  const scrollContainer = scrollContainerEl.value
+  if (!scrollContainer) return
+  const containerTop = scrollContainer.getBoundingClientRect().top
+  const mobileHeaderHeight = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--mobile-header-height'),
+  )
+
+  showTitleInMobileHeader.value =
+    titleElement.getBoundingClientRect().bottom <= containerTop + mobileHeaderHeight
+}
+
+watch([() => discussion.doc?.title, editingPost, isMobileViewport], () => {
+  nextTick(updateMobileHeaderTitle)
+})
+
+async function scrollToUnread() {
+  if (!discussion.doc) {
+    // Wait for the doc to load, but give up the moment it resolves to missing/forbidden — both so
+    // we don't await a doc that will never arrive, and so we stop reading the errored resource
+    // (which throws once its store entry is dropped). notFound is checked first so the `||`
+    // short-circuits before touching discussion.doc when the fetch failed.
+    await until(() => notFound.value || Boolean(discussion.doc)).toBeTruthy()
+    if (notFound.value || !discussion.doc) return
+  }
+
+  canonicalizeRoute()
 
   let doc = discussion.doc
   if (
@@ -374,6 +511,24 @@ function copyLink() {
   copyToClipboard(url)
 }
 
+// Undefined falls through to PageHeaderBackButton's router.back() fallback.
+const backRoute = computed<RouteLocationRaw | undefined>(() => {
+  const communityId = routeParam(route.params.communityId)
+  const spaceId = routeParam(route.params.spaceId)
+
+  if (communityId && spaceId) {
+    return { name: 'SpaceDiscussions', params: { communityId, spaceId } }
+  }
+  if (communityId) {
+    return { name: 'Discussions', params: { communityId } }
+  }
+  return undefined
+})
+
+function routeParam(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value
+}
+
 function moveToSpace() {
   if (discussionMoveDialog.project) {
     discussion.moveToProject
@@ -385,9 +540,14 @@ function moveToSpace() {
           discussionMoveDialog.show = false
           discussionMoveDialog.project = null
 
+          const communityId = discussion.doc?.project
+            ? getSpace(discussion.doc.project)?.team
+            : null
+
           router.replace({
             name: 'Discussion',
             params: {
+              communityId,
               spaceId: discussion.doc?.project,
               postId: discussion.doc?.name,
             },
@@ -400,33 +560,126 @@ function moveToSpace() {
   }
 }
 
-function updatePost() {
-  discussion.setValue
-    .submit({
-      title: discussion.doc?.title,
-      content: discussion.doc?.content,
-    })
-    .then(() => {
-      tags.reload()
-    })
-  editingPost.value = false
+const canSavePost = computed(() => Boolean(postDraftData.value.title?.trim()))
+
+// Read content from the editor's own serializer rather than discussion.doc.content:
+// the editor re-normalizes HTML on load and writes it back, so the stored value
+// drifts from the server copy without any user edit. Comparing getHTML() to
+// getHTML() keeps both sides on the same normalization.
+function currentPostContent() {
+  return postEditor.value?.editor?.getHTML() ?? discussion.doc?.content ?? ''
 }
 
-function updateUrlSlug() {
-  let doc = discussion.doc
-  if (!doc) return
-  if (!route.params.slug || route.params.slug !== doc.slug) {
-    nextTick(() => {
-      router.replace({
-        name: 'Discussion',
-        params: { ...route.params, slug: doc.slug },
-        query: route.query,
-      })
+function startEditingPost() {
+  editSnapshot.value = {
+    title: discussion.doc?.title ?? '',
+    content: currentPostContent(),
+  }
+  editingPost.value = true
+  // The options dropdown restores focus to its trigger as it closes, which would
+  // otherwise swallow the editor focus (and the Esc/⌘+Enter shortcuts). Focus the
+  // editor on the next frame, after that restore has settled.
+  nextTick(() => {
+    requestAnimationFrame(() => postEditor.value?.editor?.commands.focus())
+  })
+}
+
+function isPostDirty() {
+  if (!editSnapshot.value) return false
+  return (
+    (postDraftData.value.title ?? '') !== editSnapshot.value.title ||
+    currentPostContent() !== editSnapshot.value.content
+  )
+}
+
+function closeEditor() {
+  editingPost.value = false
+  editSnapshot.value = null
+  // Explicit discard throws the draft away (navigating away would keep it instead).
+  postDraft.clear()
+  discussion.reload()
+}
+
+function cancelEdit() {
+  if (!editingPost.value) return
+  if (isPostDirty()) {
+    dialog.danger({
+      title: 'Discard changes',
+      message: 'You have unsaved changes. Are you sure you want to discard them?',
+      confirmLabel: 'Discard changes',
+      cancelLabel: 'Keep editing',
+      onConfirm: closeEditor,
     })
+  } else {
+    closeEditor()
   }
 }
 
+function updatePost() {
+  if (!editingPost.value || !canSavePost.value) return
+  discussion.setValue
+    .submit({
+      title: postDraftData.value.title,
+      content: postDraftData.value.content,
+    })
+    .then(async () => {
+      // Content is saved onto the post; migrate the draft's attachments and delete it.
+      await postDraft.commit()
+      tags.reload()
+    })
+  editingPost.value = false
+  editSnapshot.value = null
+}
+
+function canonicalizeRoute() {
+  let doc = discussion.doc
+  if (!doc) return
+
+  // A discussion moved to another space keeps its postId, so an in-app link (which the router
+  // fast path trusts without a server check) can land on a stale spaceId/communityId. Rewrite
+  // to the document's real space here so route params — and the actions that read them, like
+  // creating from the space context — target the current space, not the old one.
+  const canonicalSpaceId = doc.project
+  const canonicalCommunityId = canonicalSpaceId ? getSpace(canonicalSpaceId)?.team : undefined
+  // Only rewrite the space when its community resolves locally too — otherwise we'd strand the
+  // new spaceId under the old communityId. If the space isn't cached yet, leave the route as-is
+  // (the slug is independent and always safe to correct).
+  //
+  // KNOWN LIMITATION: when the destination space is NOT in the local cache, the route keeps the
+  // stale spaceId/communityId. The discussion body still renders (it reads doc.project directly),
+  // but route-param-derived actions (e.g. "new discussion in this space", sidebar active-space)
+  // target the OLD space until the new one happens to be cached. Self-corrects on a refresh, which
+  // routes through the server canonicalization. Acceptable because moving a discussion is rare and
+  // the alternative (stranding the new space under the wrong community) is worse. If this becomes a
+  // real problem, fetch the destination space here instead of relying on it already being cached.
+  const spaceMismatch =
+    canonicalSpaceId &&
+    canonicalCommunityId &&
+    routeParam(route.params.spaceId) !== canonicalSpaceId
+  const slugMismatch = !route.params.slug || route.params.slug !== doc.slug
+  if (!spaceMismatch && !slugMismatch) return
+
+  nextTick(() => {
+    router.replace({
+      name: 'Discussion',
+      params: {
+        ...route.params,
+        ...(spaceMismatch ? { communityId: canonicalCommunityId, spaceId: canonicalSpaceId } : {}),
+        slug: doc.slug,
+      },
+      query: route.query,
+    })
+  })
+}
+
 const space = useSpace(() => discussion.doc?.project)
+const community = useCommunity(() => discussion.doc?.team)
+const communityTitle = computed(() => community.value?.title ?? '')
+const currentSpaceId = computed(() => {
+  if (discussion.doc?.project) return discussion.doc.project
+  if (typeof route.params.spaceId === 'string') return route.params.spaceId
+  return ''
+})
 
 const spaceOptions = useGroupedSpaceOptions({
   filterFn: (space) => !space.archived_at && space.name !== discussion.doc?.project,
@@ -436,9 +689,7 @@ const actions = computed(() => [
   {
     label: 'Edit',
     icon: 'lucide-edit',
-    onClick: () => {
-      editingPost.value = true
-    },
+    onClick: startEditingPost,
   },
   {
     label: 'Revisions',
@@ -480,9 +731,10 @@ const actions = computed(() => [
     icon: 'lucide-arrow-down-left',
     condition: () => !!discussion.doc?.pinned_at,
     onClick: () => {
+      const pinScope = discussion.doc?.pin_scope
       const scopeText =
-        discussion.doc?.pin_scope === 'Global'
-          ? 'This discussion is pinned globally across all spaces.'
+        pinScope === 'Category'
+          ? `This discussion is pinned across the ${communityTitle.value} community.`
           : `This discussion is pinned in ${space.value?.title} only.`
 
       dialog.confirm({
@@ -539,19 +791,68 @@ const actions = computed(() => [
   {
     label: 'Delete',
     icon: 'lucide-trash',
-    condition: () => !!discussion.doc?.owner && isSessionUser(discussion.doc.owner),
+    condition: () => canDeleteContent(discussion.doc, space.value, useSessionUser()),
     onClick: () => {
       dialog.danger({
         title: 'Delete',
         message: 'Are you sure you want to delete this post? This is irreversible!',
         onConfirm: async () => {
           await discussion.delete.submit()
-          router.replace({ name: 'Space' })
+          router.replace({
+            name: 'Space',
+            params: {
+              communityId: route.params.communityId,
+              spaceId: route.params.spaceId,
+            },
+          })
         },
       })
     },
   },
 ])
+
+useCommandPaletteCommands(
+  computed(() => {
+    if (props.readOnlyMode || !discussion.doc) return []
+
+    return actions.value.map((action) => {
+      const title = cleanCommandTitle(action.label)
+      return {
+        title,
+        name: `discussion-${title.toLowerCase().replace(/\s+/g, '-')}`,
+        group: 'Discussion',
+        icon: action.icon,
+        aliases: discussionCommandAliases(title),
+        onClick: action.onClick,
+        condition: action.condition,
+        defaultScore: title === 'Copy link' ? 3 : 2,
+      }
+    })
+  }),
+)
+
+function cleanCommandTitle(title: string) {
+  return title.replace(/\.\.\.$/, '')
+}
+
+function discussionCommandAliases(title: string) {
+  const aliases: Record<string, string[]> = {
+    Edit: ['edit post', 'edit discussion'],
+    Revisions: ['history', 'version history', 'edits'],
+    'Copy link': ['copy url', 'share link'],
+    'Mark as unread': ['unread', 'remind me'],
+    Bookmark: ['save', 'save for later'],
+    'Remove Bookmark': ['unsave', 'remove saved'],
+    'Pin discussion': ['pin', 'keep on top'],
+    'Unpin discussion': ['unpin', 'remove pin'],
+    'Close discussion': ['lock discussion', 'disable comments'],
+    'Re-open discussion': ['reopen', 'unlock discussion'],
+    'Move to': ['move discussion', 'change space'],
+    Delete: ['delete discussion', 'remove discussion'],
+  }
+
+  return aliases[title] || []
+}
 
 // Page Meta
 usePageMeta(() => {

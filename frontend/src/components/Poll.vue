@@ -7,24 +7,22 @@
     <div
       class="pb-2 flex items-center text-base text-ink-gray-8 pt-15 top-0 sticky bg-surface-base"
     >
-      <UserInfo :email="_poll.owner" v-slot="{ user }">
-        <UserProfileLink class="mr-3" :user="user.name">
-          <UserAvatarWithHover :user="user.name" size="lg" />
+      <UserProfileLink class="mr-3" :user="owner.name">
+        <UserAvatarWithHover :user="owner.name" size="lg" />
+      </UserProfileLink>
+      <div class="md:flex md:items-center">
+        <UserProfileLink class="font-medium hover:text-ink-blue-8" :user="owner.name">
+          {{ owner.full_name }}
+          <span class="hidden md:inline">&nbsp;&middot;&nbsp;</span>
         </UserProfileLink>
-        <div class="md:flex md:items-center">
-          <UserProfileLink class="font-medium hover:text-ink-blue-8" :user="user.name">
-            {{ user.full_name }}
-            <span class="hidden md:inline">&nbsp;&middot;&nbsp;</span>
-          </UserProfileLink>
-          <div>
-            <Tooltip :text="dayjsLocal(_poll.creation).format('D MMM YYYY [at] h:mm A')">
-              <time class="text-ink-gray-5" :datetime="_poll.creation">
-                {{ dayjsLocal(_poll.creation).fromNow() }}
-              </time>
-            </Tooltip>
-          </div>
+        <div>
+          <Tooltip :text="dayjsLocal(_poll.creation).format('D MMM YYYY [at] h:mm A')">
+            <time class="text-ink-gray-5" :datetime="_poll.creation">
+              {{ dayjsLocal(_poll.creation).fromNow() }}
+            </time>
+          </Tooltip>
         </div>
-      </UserInfo>
+      </div>
       <div class="ml-auto flex items-center space-x-2">
         <Button
           v-if="!isStopped && $isSessionUser(_poll.owner)"
@@ -100,15 +98,13 @@
             <div class="ml-1 text-base text-ink-gray-5">({{ option.percentage }}%)</div>
           </div>
           <div class="space-y-2">
-            <div class="flex" v-for="user in option.voters" :key="user">
-              <UserInfo :email="user" v-slot="{ user: _user }">
-                <UserProfileLink :user="_user.name">
-                  <div class="flex items-center space-x-2">
-                    <UserAvatar size="sm" :user="_user.name" />
-                    <span class="text-base text-ink-gray-8">{{ _user.full_name }}</span>
-                  </div>
-                </UserProfileLink>
-              </UserInfo>
+            <div class="flex" v-for="voter in option.voters" :key="voter.name">
+              <UserProfileLink :user="voter.name">
+                <div class="flex items-center space-x-2">
+                  <UserAvatar size="sm" :user="voter.name" />
+                  <span class="text-base text-ink-gray-8">{{ voter.full_name }}</span>
+                </div>
+              </UserProfileLink>
             </div>
           </div>
         </div>
@@ -119,9 +115,12 @@
 <script>
 import { Dropdown, Dialog, Tooltip, dayjsLocal, dialog } from 'frappe-ui'
 import UserAvatar from './UserAvatar.vue'
+import UserAvatarWithHover from './UserAvatarWithHover.vue'
 import UserProfileLink from './UserProfileLink.vue'
 import { copyToClipboard } from '@/utils'
 import Reactions from './Reactions.vue'
+import { useUser, useSessionUser } from '@/data/users'
+import { canDeleteContent } from '@/utils/permissions'
 
 export default {
   name: 'Poll',
@@ -134,11 +133,17 @@ export default {
       type: Boolean,
       default: false,
     },
+    // Space the poll's discussion belongs to, for community-admin delete moderation.
+    space: {
+      type: Object,
+      default: null,
+    },
   },
   emits: ['vote'],
   components: {
     UserProfileLink,
     UserAvatar,
+    UserAvatarWithHover,
     Dropdown,
     Tooltip,
     Reactions,
@@ -208,6 +213,9 @@ export default {
     },
   },
   computed: {
+    owner() {
+      return useUser(this._poll.owner)
+    },
     participated() {
       return this._poll.votes.some((d) => d.user === this.$user().name) ?? false
     },
@@ -220,7 +228,7 @@ export default {
           percentage: option.percentage,
           voters: this._poll.votes
             .filter((vote) => vote.option === option.title)
-            .map((vote) => vote.user),
+            .map((vote) => useUser(vote.user)),
         }
       })
     },
@@ -258,7 +266,7 @@ export default {
         {
           label: 'Delete',
           icon: 'lucide-trash',
-          condition: () => this.$isSessionUser(this._poll.owner),
+          condition: () => canDeleteContent(this._poll, this.space, useSessionUser()),
           onClick: () => {
             dialog.danger({
               title: 'Delete poll',

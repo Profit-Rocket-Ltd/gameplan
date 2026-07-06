@@ -10,14 +10,19 @@
   <div v-else>
     <div class="relative" v-for="d in pages.data" :key="d.name">
       <router-link
-        :to="{
-          name: d.project ? 'SpacePage' : 'Page',
-          params: {
-            pageId: d.name,
-            slug: d.slug,
-            spaceId: d.project,
-          },
-        }"
+        :to="
+          d.project
+            ? {
+                name: 'SpacePage',
+                params: {
+                  communityId: d.team || getSpace(d)?.team,
+                  pageId: d.name,
+                  slug: d.slug,
+                  spaceId: d.project,
+                },
+              }
+            : { name: 'Page', params: { pageId: d.name, slug: d.slug } }
+        "
       >
         <section class="group">
           <div
@@ -40,13 +45,11 @@
                 v-if="d.project"
                 :set="(space = getSpace(d))"
               >
-                <div>
-                  {{ space?.icon }}
-                </div>
+                <SpaceIcon :icon="space?.icon" class="size-4 text-ink-gray-6" />
                 <div>{{ space?.title }}</div>
               </div>
             </div>
-            <div class="shrink-0 ml-1 invisible group-hover:visible">
+            <div v-if="!readOnly" class="shrink-0 ml-1 invisible group-hover:visible">
               <Dropdown
                 :button="{
                   icon: 'lucide-more-horizontal',
@@ -67,25 +70,29 @@
 <script setup lang="ts">
 import { Dropdown, useList, UseListOptions, dialog } from 'frappe-ui'
 import EmptyStateBox from '@/components/EmptyStateBox.vue'
+import SpaceIcon from '@/components/SpaceIcon.vue'
 import { GPPage } from '@/types/doctypes'
 import { useSpace } from '@/data/spaces'
+import { useSessionUser } from '@/data/users'
+import { canDeleteContent } from '@/utils/permissions'
 
 const props = defineProps<{
   listOptions: {
     filters: UseListOptions<GPPage>['filters']
     orderBy?: UseListOptions<GPPage>['orderBy']
   }
+  readOnly?: boolean
 }>()
 
 interface Page
   extends Pick<
     GPPage,
-    'name' | 'creation' | 'title' | 'content' | 'slug' | 'project' | 'team' | 'modified'
+    'name' | 'creation' | 'title' | 'content' | 'slug' | 'project' | 'team' | 'modified' | 'owner'
   > {}
 
 const pages = useList<Page>({
   doctype: 'GP Page',
-  fields: ['name', 'creation', 'title', 'content', 'slug', 'project', 'team', 'modified'],
+  fields: ['name', 'creation', 'title', 'content', 'slug', 'project', 'team', 'modified', 'owner'],
   filters: props.listOptions.filters,
   orderBy: props.listOptions.orderBy,
   cacheKey: ['Pages', props.listOptions],
@@ -99,6 +106,7 @@ const getDropdownOptions = (page: Page) => [
   {
     label: 'Delete',
     icon: 'lucide-trash',
+    condition: () => canDeleteContent(page, getSpace(page), useSessionUser()),
     onClick: () => {
       dialog.danger({
         title: 'Delete Page',

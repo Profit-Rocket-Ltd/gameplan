@@ -1,249 +1,163 @@
 <template>
-  <div v-if="profile">
+  <div v-if="profile" class="min-h-full bg-surface-base">
     <PageHeader>
-      <Breadcrumbs
-        :items="[
-          { label: 'People', route: { name: 'People' } },
-          {
-            label: profile?.full_name,
-            route: { name: 'PersonProfile', params: { personId } },
-          },
-        ]"
-      />
-      <div class="h-7"></div>
-    </PageHeader>
-    <div>
-      <CoverImage
-        :imageUrl="profile.cover_image"
-        :imagePosition="profile.cover_image_position"
-        :editable="$isSessionUser(profile.user)"
-        @change="
-          ({ imageUrl, imagePosition }) => {
-            $resources.profile.setValue.submit({
-              cover_image: imageUrl,
-              cover_image_position: imagePosition,
-            })
-          }
-        "
-      />
-    </div>
-    <div class="-mt-4 body-container">
-      <div class="flex items-center">
-        <div class="-mx-1 inline-flex translate-y-0">
-          <ImagePreview v-model:show="imagePreview.show" :imageUrl="imagePreview.imageUrl" />
-          <button
-            v-if="currentUser.user_image"
-            @click="
-              () => {
-                imagePreview.imageUrl = currentUser.user_image
-                imagePreview.show = true
-              }
-            "
-            class="rounded-full shrink-0 bg-surface-base outline-none hover:brightness-110 focus-visible:ring focus-visible:ring-outline-gray-3"
-          >
-            <UserImage
-              class="h-[100px] w-[100px] rounded-full border-4 border-outline-base object-cover"
-              :user="currentUser.name"
-            />
-          </button>
-          <button
-            v-else
-            @click="editDialog.show = true"
-            class="h-32 w-32 rounded-full border-4 border-white bg-surface-gray-3 text-sm text-ink-gray-5"
-            :class="{ 'hover:bg-surface-gray-4': $isSessionUser(profile.user) }"
-            :disabled="!$isSessionUser(profile.user)"
-          >
-            <span v-if="$isSessionUser(profile.user)"> Upload Image </span>
-          </button>
-        </div>
-        <div class="ml-6 flex-1">
-          <h2 class="mt-2 text-5xl-semibold text-ink-gray-8">
-            {{ user ? user.full_name : profile.full_name }}
-          </h2>
-          <p v-if="profile.bio" class="mt-2 text-base text-ink-gray-6">
-            {{ profile.bio }}
-          </p>
-        </div>
-        <div v-if="$isSessionUser(profile.user)">
-          <Button icon-left="lucide-edit" @click="editDialog.show = true" class="hidden sm:flex">
-            Edit Profile
-          </Button>
+      <Breadcrumbs class="h-7" :items="profileBreadcrumbs">
+        <template #suffix="{ item }">
           <Button
-            label="Edit Profile"
+            v-if="isOwnProfile && item.isPageTitle"
+            variant="ghost"
+            size="sm"
             icon="lucide-edit"
-            @click="editDialog.show = true"
-            class="sm:hidden"
+            label="Edit profile"
+            tooltip="Edit profile"
+            class="ml-1 shrink-0"
+            @click="showSettingsDialog('Profile')"
           />
-        </div>
-      </div>
+        </template>
+      </Breadcrumbs>
+    </PageHeader>
 
-      <div class="mb-4 mt-6">
+    <div class="mx-auto w-full max-w-[860px] px-3 py-4 sm:px-5 sm:py-6">
+      <div class="mb-4 flex items-center justify-between gap-3">
         <TabButtons
-          class="inline-block"
-          :buttons="
-            [
-              { label: 'About' },
-              { label: 'Posts' },
-              { label: 'Replies' },
-              $isSessionUser(profile.user) ? { label: 'Bookmarks' } : null,
-            ].filter(Boolean)
-          "
+          :buttons="[
+            { label: 'Profile' },
+            { label: 'About' },
+            { label: 'Posts' },
+            { label: 'Replies' },
+          ]"
           v-model="activeTab"
         />
+        <Button
+          v-if="isOwnProfile && activeTab === 'Profile' && hasProfilePage"
+          class="shrink-0"
+          icon-left="lucide-layout-dashboard"
+          :route="{ name: 'ProfileCustomize' }"
+        >
+          Customize
+        </Button>
       </div>
 
-      <router-view :profile="$resources.profile" />
+      <router-view
+        :profile="profileChildResource"
+        :bento-cards="profileBentoCards"
+        :bento-cards-loaded="profileBentoLoaded"
+        :has-profile-page="hasProfilePage"
+        :is-own-profile="isOwnProfile"
+      />
     </div>
-    <Dialog
-      v-if="$isSessionUser(profile.user)"
-      title="Edit Profile"
-      v-model:open="editDialog.show"
-      @after-leave="discard"
-    >
-      <div class="space-y-4">
-        <ProfileImageEditor :profile="$resources.profile" v-if="editDialog.editingProfilePhoto" />
-        <template v-else>
-          <div class="flex items-center gap-4">
-            <UserAvatar size="lg" :user="profile.user" />
-            <Button @click="editDialog.editingProfilePhoto = true"> Edit Profile Photo </Button>
-          </div>
-          <FormControl label="First Name" v-model="user.first_name" />
-          <FormControl label="Last Name" v-model="user.last_name" />
-          <FormControl label="Bio" v-model="profile.bio" type="textarea" maxlength="280" />
-        </template>
-      </div>
-      <template #actions>
-        <Button
-          variant="solid"
-          class="w-full"
-          @click="save"
-          :loading="$resources.user.setValue.loading || $resources.profile.setValue.loading"
-        >
-          Save
-        </Button>
-      </template>
-    </Dialog>
   </div>
 </template>
-<script>
-import { Breadcrumbs, Dialog, FileUploader, FormControl, TabButtons } from 'frappe-ui'
-import PageHeader from '@/components/PageHeader.vue'
-import CoverImage from '@/components/CoverImage.vue'
-import ImagePreview from '../components/ImagePreview.vue'
-import ColorPicker from '@/components/ColorPicker.vue'
-import ProfileImageEditor from '@/components/ProfileImageEditor.vue'
-import UserImage from '@/components/UserImage.vue'
-import { isSessionUser } from '@/data/session'
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { PageHeader, Breadcrumbs, Button, TabButtons, useDoc, usePageMeta } from 'frappe-ui'
+import { showSettingsDialog } from '@/components/Settings'
+import { getProfileBentoCards } from '@/components/ProfileBento/profileBentoSource'
+import type { ProfileBentoCard } from '@/components/ProfileBento/types'
+import { useSessionUser } from '@/data/users'
+import type { GPUserProfile } from '@/types/doctypes'
 
-export default {
+defineOptions({
   name: 'PersonProfile',
-  props: ['personId'],
-  components: {
-    CoverImage,
-    Dialog,
-    FileUploader,
-    ImagePreview,
-    ColorPicker,
-    ProfileImageEditor,
-    UserImage,
-    FormControl,
-    TabButtons,
-    Breadcrumbs,
-    PageHeader,
+})
+
+const props = defineProps<{
+  personId: string
+}>()
+
+const route = useRoute()
+const router = useRouter()
+const sessionUser = useSessionUser()
+const personId = computed(() => {
+  return props.personId || route.params.personId?.toString() || 'missing-profile'
+})
+
+const profileResource = useDoc<GPUserProfile>({
+  doctype: 'GP User Profile',
+  name: personId,
+})
+
+const profile = computed(() => profileResource.doc)
+const profileChildResource = computed(() => ({
+  ...profileResource,
+  doc: profile.value,
+}))
+const isOwnProfile = computed(() => profile.value?.user === sessionUser.name)
+
+const profileBentoCards = ref<ProfileBentoCard[]>([])
+const profileBentoLoaded = ref(false)
+const hasProfilePage = ref(false)
+let profileBentoLoadId = 0
+let loadedProfileBentoName = ''
+
+const profileBreadcrumbs = computed(() => [
+  { label: 'People', route: { name: 'People' } },
+  {
+    label: profile.value?.full_name || 'Profile',
+    route: { name: 'PersonProfileProfile', params: { personId: personId.value } },
+    isPageTitle: true,
   },
-  data() {
-    return {
-      editing: false,
-      editDialog: { show: false, editingProfilePhoto: false },
-      profilePhotoDialog: { show: false },
-      imagePreview: { show: false, imageUrl: null },
+])
+
+const activeTab = computed({
+  get() {
+    return (
+      {
+        PersonProfileProfile: 'Profile',
+        PersonProfileAboutMe: 'About',
+        PersonProfilePosts: 'Posts',
+        PersonProfileReplies: 'Replies',
+      }[route.name as string] || 'Profile'
+    )
+  },
+  set(value) {
+    let profileRoute = {
+      Profile: { name: 'PersonProfileProfile' },
+      About: { name: 'PersonProfileAboutMe' },
+      Posts: { name: 'PersonProfilePosts' },
+      Replies: { name: 'PersonProfileReplies' },
+    }[value]
+    if (profileRoute) {
+      router.push(profileRoute)
     }
   },
-  resources: {
-    profile() {
-      return {
-        type: 'document',
-        doctype: 'GP User Profile',
-        name: this.personId,
-        realtime: true,
-        whitelistedMethods: {
-          setImage: 'set_image',
-          removeImageBackground: 'remove_image_background',
-          revertImageBackground: 'revert_image_background',
-          isBackgroundRemovalAvailable: 'is_background_removal_available',
-        },
-      }
-    },
-    user() {
-      if (!this.profile || !this.$isSessionUser(this.profile.user)) return
-      return {
-        type: 'document',
-        doctype: 'User',
-        name: this.profile.user,
-        realtime: true,
-      }
-    },
-  },
-  computed: {
-    profile() {
-      return this.$resources.profile.doc
-    },
-    user() {
-      return this.$resources.user?.doc
-    },
-    currentUser() {
-      return this.$user(this.profile.user)
-    },
-    activeTab: {
-      get() {
-        return {
-          PersonProfileAboutMe: 'About',
-          PersonProfilePosts: 'Posts',
-          PersonProfileReplies: 'Replies',
-          PersonProfileBookmarks: 'Bookmarks',
-        }[this.$route.name]
-      },
-      set(value) {
-        let route = {
-          About: { name: 'PersonProfileAboutMe' },
-          Posts: { name: 'PersonProfilePosts' },
-          Replies: { name: 'PersonProfileReplies' },
-          Bookmarks: { name: 'PersonProfileBookmarks' },
-        }[value]
-        if (route) {
-          this.$router.push(route)
-        }
-      },
-    },
-  },
-  methods: {
-    save() {
-      this.$resources.user.setValue
-        .submit({
-          first_name: this.user.first_name,
-          last_name: this.user.last_name,
-        })
-        .then(() => {
-          this.$resources.profile.setValue.submit({
-            bio: this.profile.bio,
-          })
-          this.editDialog.show = false
-        })
-    },
-    discard() {
-      this.$resources.user.reload()
-      this.$resources.profile.reload()
-      this.editDialog = this.$options.data().editDialog
-    },
-    setUserImage(url) {
-      this.$resources.user.setValue.submit({ user_image: url })
-      this.currentUser.user_image = url
-    },
-  },
-  pageMeta() {
-    return {
-      title: [this.profile?.full_name || '', 'Profile'].join(' | '),
-    }
-  },
+})
+
+watch(
+  () => profile.value?.name,
+  () => loadProfileBentoCards(profile.value?.name),
+  { immediate: true },
+)
+
+async function loadProfileBentoCards(profileName?: string) {
+  let loadId = ++profileBentoLoadId
+  if (!profileName) {
+    loadedProfileBentoName = ''
+    profileBentoCards.value = []
+    profileBentoLoaded.value = false
+    hasProfilePage.value = false
+    return
+  }
+
+  if (profileName !== loadedProfileBentoName) {
+    profileBentoCards.value = []
+    profileBentoLoaded.value = false
+    hasProfilePage.value = false
+  }
+
+  let loadResult = await getProfileBentoCards(profileName)
+  if (loadId === profileBentoLoadId) {
+    loadedProfileBentoName = profileName
+    profileBentoCards.value = loadResult.cards
+    profileBentoLoaded.value = true
+    hasProfilePage.value = !loadResult.isDefault
+  }
 }
+
+usePageMeta(() => {
+  return {
+    title: [profile.value?.full_name || '', 'Profile'].join(' | '),
+  }
+})
 </script>

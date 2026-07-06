@@ -5,7 +5,6 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import cstr
 
-import gameplan
 from gameplan.gameplan.doctype.gp_notification.gp_notification import GPNotification
 from gameplan.gameplan.doctype.gp_unread_record.gp_unread_record import GPUnreadRecord
 from gameplan.mixins.activity import HasActivity
@@ -13,6 +12,7 @@ from gameplan.mixins.attachments import HasAttachments
 from gameplan.mixins.mentions import HasMentions
 from gameplan.mixins.reactions import HasReactions
 from gameplan.mixins.tags import HasTags
+from gameplan.permissions import content_has_permission, discussion_query_conditions
 from gameplan.utils import get_document_revisions, remove_empty_trailing_paragraphs, url_safe_slug
 
 
@@ -91,6 +91,13 @@ class GPDiscussion(HasActivity, HasAttachments, HasMentions, HasReactions, HasTa
 		self.log_title_update()
 		self.update_participants_count()
 		self.attach_files_in_content()
+		self.sync_unread_records_on_move()
+
+	def sync_unread_records_on_move(self):
+		# When a discussion moves to another space, realign its unread records so the count
+		# follows it instead of staying attributed to (and stuck in) the old space.
+		if self.has_value_changed("project"):
+			GPUnreadRecord.update_project_for_discussion(self.name, self.project)
 
 	def before_save(self):
 		self.update_slug()
@@ -162,7 +169,7 @@ class GPDiscussion(HasActivity, HasAttachments, HasMentions, HasReactions, HasTa
 		self.save()
 
 	@frappe.whitelist()
-	def pin_discussion(self, pin_scope="Global"):
+	def pin_discussion(self, pin_scope="Category"):
 		if self.pinned_at:
 			return
 		self.pinned_at = frappe.utils.now()
@@ -326,27 +333,8 @@ def move_discussions(discussions: list[dict]):
 
 
 def get_permission_query_conditions(user):
-	if not user:
-		user = frappe.session.user
-
-	if not gameplan.is_guest(user):
-		return None
-
-	escaped_user = frappe.db.escape(user)
-	return f"""`tabGP Discussion`.project in (
-		select `tabGP Guest Access`.project
-		from `tabGP Guest Access`
-		where `tabGP Guest Access`.user = {escaped_user}
-	)"""
+	return discussion_query_conditions(user)
 
 
 def has_permission(doc, ptype="read", user=None):
-	user = user or frappe.session.user
-
-	if not gameplan.is_guest(user):
-		return True
-
-	if not doc.project:
-		return False
-
-	return bool(frappe.db.exists("GP Guest Access", {"user": user, "project": doc.project}))
+	return content_has_permission(doc, ptype, user)

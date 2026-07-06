@@ -20,20 +20,11 @@
             label="Role"
             :options="[
               { label: 'Admin', value: 'Gameplan Admin' },
-              { label: 'Member', value: 'Gameplan Member' },
-              { label: 'Guest', value: 'Gameplan Guest' },
+              { label: 'User', value: 'Gameplan Member' },
             ]"
             v-model="role"
           />
           <p class="mt-2 text-base text-ink-gray-8">{{ description }}</p>
-        </div>
-        <div v-if="role === 'Gameplan Guest'">
-          <MultiSelect
-            label="Invite Guest to Spaces"
-            :options="groupedSpaceOptions"
-            v-model="selectedProjects"
-            placeholder="Select spaces"
-          />
         </div>
         <ErrorMessage :message="inviteByEmail.error" />
         <Button
@@ -42,7 +33,7 @@
             inviteByEmail.submit({
               emails,
               role,
-              projects: selectedProjects.length ? selectedProjects : null,
+              projects: null,
             })
           "
           :loading="inviteByEmail.loading"
@@ -55,7 +46,7 @@
       <div class="mt-4 flex items-center justify-between border-b py-2 text-base text-ink-gray-5">
         <div class="w-4/5">Pending Invites</div>
       </div>
-      <ul class="divide-y overflow-auto">
+      <ul class="divide-y">
         <li
           class="flex items-center justify-between py-2"
           v-for="invitation in pendingInvitations.data"
@@ -65,7 +56,7 @@
             <span class="text-ink-gray-8">
               {{ invitation.email }}
             </span>
-            <span class="text-ink-gray-5"> ({{ invitation.role.replace('Gameplan ', '') }}) </span>
+            <span class="text-ink-gray-5"> ({{ getRoleLabel(invitation.role) }}) </span>
           </div>
           <div>
             <Tooltip text="Delete Invitation">
@@ -96,29 +87,28 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { MultiSelect, Select, Tooltip } from 'frappe-ui'
+import { Select, Tooltip } from 'frappe-ui'
 import { useCall, useList } from 'frappe-ui'
-import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
 import { GPInvitation } from '@/types/doctypes'
 
-type Role = 'Gameplan Admin' | 'Gameplan Member' | 'Gameplan Guest'
+type Role = 'Gameplan Admin' | 'Gameplan Member'
 
 const role = ref<Role>('Gameplan Member')
 const emails = ref('')
-const selectedProjects = ref<string[]>([])
 const pendingToDelete = ref<string | null>(null)
-
-const groupedSpaceOptions = useGroupedSpaceOptions({ filterFn: (space) => !space.archived_at })
 
 const description = computed((): string => {
   const descriptions: Record<Role, string> = {
     'Gameplan Admin':
-      'Can create new teams and projects, invite admins and members, browse and create discussions.',
-    'Gameplan Member': 'Can create projects, invite members, browse and create discussions.',
-    'Gameplan Guest': 'Can browse and participate in invited teams or projects.',
+      'Can create communities and spaces, invite admins and users, browse and create discussions.',
+    'Gameplan Member': 'Can join communities, create spaces, browse and create discussions.',
   }
   return descriptions[role.value]
 })
+
+function getRoleLabel(role: string) {
+  return role === 'Gameplan Member' ? 'User' : role.replace('Gameplan ', '')
+}
 
 const pendingInvitations = useList<GPInvitation>({
   doctype: 'GP Invitation',
@@ -140,7 +130,6 @@ const inviteByEmail = useCall<
   onSuccess: () => {
     role.value = 'Gameplan Member'
     emails.value = ''
-    selectedProjects.value = []
     pendingInvitations.reload()
   },
 })

@@ -2,13 +2,13 @@
   <DropdownMoreOptions
     :label="`${space?.title} Space Options`"
     v-bind="$attrs"
+    button-size="xs"
     :options="options"
   />
 
   <MergeSpaceDialog v-model="showSpaceMergeDialog" :spaceId="props.spaceId" />
   <ChangeSpaceCategoryDialog v-model="showSpaceCategoryDialog" :spaceId="props.spaceId" />
-  <EditSpaceDialog v-model="showSpaceEditDialog" :spaceId="props.spaceId" />
-  <ManageMembersDialog v-model="inviteGuestDialog" :spaceId="props.spaceId" />
+  <SpaceAccessDialog v-model="showSpaceAccessDialog" :spaceId="props.spaceId" />
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
@@ -16,11 +16,10 @@ import { useDoctype, dialog } from 'frappe-ui'
 import DropdownMoreOptions from './DropdownMoreOptions.vue'
 import MergeSpaceDialog from './MergeSpaceDialog.vue'
 import ChangeSpaceCategoryDialog from './ChangeSpaceCategoryDialog.vue'
-import EditSpaceDialog from './EditSpaceDialog.vue'
-import ManageMembersDialog from './ManageMembersDialog.vue'
-import { useSpace, hasJoined, joinSpace, leaveSpace } from '@/data/spaces'
-import { markSpaceAsRead } from '@/data/unreadCount'
+import SpaceAccessDialog from './SpaceAccessDialog.vue'
+import { useSpacePermissions, archiveSpace } from '@/data/spaces'
 import { GPProject } from '@/types/doctypes'
+import { useCommandPaletteCommands } from './CommandPalette/registry'
 
 defineOptions({
   inheritAttrs: false,
@@ -30,79 +29,39 @@ const props = defineProps<{
   spaceId: string
 }>()
 
-const space = useSpace(() => props.spaceId)
+const { space, canEditSpace, canManageAccess } = useSpacePermissions(() => props.spaceId)
 const spaces = useDoctype<GPProject>('GP Project')
 
 const showSpaceMergeDialog = ref(false)
 const showSpaceCategoryDialog = ref(false)
-const showSpaceEditDialog = ref(false)
-const inviteGuestDialog = ref(false)
+const showSpaceAccessDialog = ref(false)
 
 const options = computed(() => [
   {
-    label: 'Edit',
-    icon: 'lucide-edit',
-    onClick: () => (showSpaceEditDialog.value = true),
-    condition: () => !space.value?.archived_at,
+    label: 'Manage access',
+    icon: 'lucide-users',
+    onClick: () => (showSpaceAccessDialog.value = true),
+    condition: () => canManageAccess.value,
   },
   {
-    label: 'Mark all as read',
-    icon: 'lucide-check',
-    onClick: () => {
-      dialog.confirm({
-        title: 'Are you sure?',
-        message:
-          'This action will mark all discussions in this space as read. This action cannot be undone.',
-        confirmLabel: 'Mark all as read',
-        onConfirm: () => markSpaceAsRead(props.spaceId),
-      })
-    },
-    condition: () => !space.value?.archived_at,
-  },
-  {
-    label: hasJoined(props.spaceId) ? 'Leave space' : 'Join space',
-    icon: hasJoined(props.spaceId) ? 'lucide-log-out' : 'lucide-log-in',
-    onClick: () => {
-      if (space.value) {
-        if (hasJoined(props.spaceId)) {
-          leaveSpace(space.value)
-        } else {
-          joinSpace(space.value)
-        }
-      }
-    },
-    condition: () => !space.value?.archived_at,
-  },
-  {
-    label: 'Manage Members',
-    icon: 'lucide-user-plus',
-    onClick: () => (inviteGuestDialog.value = true),
-    condition: () => !space.value?.archived_at,
-  },
-  {
-    label: 'Change Category',
+    label: 'Change Community',
     icon: 'lucide-log-out',
     onClick: () => (showSpaceCategoryDialog.value = true),
-    condition: () => !space.value?.archived_at,
+    condition: () => canEditSpace.value,
   },
   {
     label: 'Merge',
     icon: 'lucide-merge',
     onClick: () => (showSpaceMergeDialog.value = true),
+    condition: () => canEditSpace.value,
   },
   {
     label: 'Archive',
     icon: 'lucide-archive',
-    onClick: () => {
-      dialog.confirm({
-        title: 'Archive space',
-        message:
-          'You cannot create new discussions, pages or tasks in an archived space. It will remain read-only. You can unarchive it again at any time.',
-        confirmLabel: 'Archive',
-        onConfirm: () => spaces.runDocMethod.submit({ method: 'archive', name: props.spaceId }),
-      })
-    },
-    condition: () => !space.value?.archived_at,
+    onClick: () => space.value && archiveSpace(space.value),
+    // Archiving is destructive — require manage access, matching the space header menu, so a
+    // regular member isn't offered an action they lack permission for.
+    condition: () => canEditSpace.value && canManageAccess.value,
   },
   {
     label: 'Delete',
@@ -120,7 +79,34 @@ const options = computed(() => [
         onConfirm: () => spaces.delete.submit({ name: props.spaceId }),
       })
     },
-    condition: () => !space.value?.archived_at,
+    condition: () => canEditSpace.value,
   },
 ])
+
+useCommandPaletteCommands(
+  computed(() =>
+    options.value.map((option) => ({
+      title: `${option.label} space`,
+      name: `space-${option.label.toLowerCase().replace(/\W+/g, '-')}`,
+      group: 'Space',
+      icon: option.icon,
+      aliases: spaceActionAliases(option.label),
+      onClick: option.onClick,
+      condition: option.condition,
+      defaultScore: option.label === 'Delete' ? 1 : 2,
+    })),
+  ),
+)
+
+function spaceActionAliases(label: string) {
+  const aliases: Record<string, string[]> = {
+    'Manage access': ['space access', 'guests', 'members'],
+    'Change Community': ['move space', 'change category'],
+    Merge: ['merge space'],
+    Archive: ['archive space', 'read only'],
+    Delete: ['delete space', 'remove space'],
+  }
+
+  return aliases[label] || []
+}
 </script>

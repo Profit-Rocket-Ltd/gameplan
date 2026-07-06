@@ -1,6 +1,20 @@
 <template>
   <div>
-    <PageHeader>
+    <PageHeaderMobile class="sm:hidden" title="Tasks">
+      <template #left>
+        <PageHeaderBackButton :to="{ name: 'More' }" />
+      </template>
+      <template #right>
+        <Button
+          variant="ghost"
+          size="md"
+          icon="lucide-plus"
+          label="Add task"
+          @click="openNewTaskDialog"
+        />
+      </template>
+    </PageHeaderMobile>
+    <PageHeader class="hidden sm:flex">
       <Breadcrumbs class="h-7" :items="[{ label: 'My Tasks', route: { name: 'MyTasks' } }]" />
       <Button variant="solid" icon-left="lucide-plus" @click="openNewTaskDialog"> Add new </Button>
     </PageHeader>
@@ -28,10 +42,17 @@
 </template>
 <script setup lang="ts">
 import { ref, useTemplateRef } from 'vue'
-import { usePageMeta, Breadcrumbs, TabButtons } from 'frappe-ui'
+import {
+  PageHeaderBackButton,
+  PageHeaderMobile,
+  PageHeader,
+  usePageMeta,
+  Breadcrumbs,
+  Button,
+  TabButtons,
+} from 'frappe-ui'
 import { useUser } from '@/data/users'
 import TaskList from '@/components/TaskList.vue'
-import PageHeader from '@/components/PageHeader.vue'
 import { showNewTaskDialog } from '@/components/NewTaskDialog'
 
 let taskList = useTemplateRef<typeof TaskList>('taskList')
