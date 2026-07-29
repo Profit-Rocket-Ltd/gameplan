@@ -39,16 +39,62 @@ jobs:
           github-token: ${{ github.token }}
           path: artifacts
 
+      # Resolved from the workflow_run event's own head_sha and head_repository, both
+      # trusted. Reading the number out of the uploaded event.json instead would let a
+      # fork name any PR in the repo and have this write-authorized token comment on
+      # it. A commit can belong to several open PRs, so this must resolve to exactly
+      # one match; anything ambiguous comments nowhere rather than guessing.
       - name: Resolve PR number
         id: pr
-        run: echo "number=$(jq -r '.pull_request.number' artifacts/cypress-event/event.json)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          matches="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" --paginate \
+            --jq "[.[]
+              | select(.state == \"open\")
+              | select(.head.sha == \"${HEAD_SHA}\")
+              | select(.head.repo.full_name == \"${HEAD_REPO}\")
+              | .number]")"
+          count="$(jq -r 'length' <<<"$matches")"
 
-      - name: Build markdown report
-        run: python .github/scripts/junit_to_markdown.py artifacts/cypress-results "${{ github.event.workflow_run.head_sha }}" > "$RUNNER_TEMP/ui-test-report.md"
+          if [ "$count" = "1" ]; then
+            echo "number=$(jq -r '.[0]' <<<"$matches")" >> "$GITHUB_OUTPUT"
+          else
+            echo "Expected exactly one open PR at ${HEAD_SHA} on ${HEAD_REPO}, found ${count}; not commenting."
+            echo "number=" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Comment results on PR (fork)
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: ui-test-results
-          number: ${{ steps.pr.outputs.number }}
-          path: ${{ runner.temp }}/ui-test-report.md
+      # Both XML inputs are fork-controlled, so the coverage script caps their size
+      # and refuses entity declarations before parsing.
+      - name: Build frontend report
+        if: ${{ steps.pr.outputs.number != '' }}
+        run: |
+          python .github/scripts/junit_to_markdown.py artifacts/frontend-results/junit \
+            --label Cypress --kind spec \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${{ github.event.workflow_run.id }}" \
+            > "${RUNNER_TEMP}/frontend-section.md"
+
+          if python .github/scripts/coverage_report.py \
+              artifacts/frontend-results/cobertura-coverage.xml \
+              --profile frontend --compact --markdown "${RUNNER_TEMP}/frontend-coverage.md"; then
+            printf '\n' >> "${RUNNER_TEMP}/frontend-section.md"
+            cat "${RUNNER_TEMP}/frontend-coverage.md" >> "${RUNNER_TEMP}/frontend-section.md"
+          else
+            printf '\nFrontend coverage was unavailable for this run.\n' >> "${RUNNER_TEMP}/frontend-section.md"
+          fi
+
+      - name: Comment on PR (fork)
+        if: ${{ steps.pr.outputs.number != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/pr_comment.py \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pr "${{ steps.pr.outputs.number }}" \
+            --section frontend \
+            --body-file "${RUNNER_TEMP}/frontend-section.md" \
+            --footer "<sub>Updated for commit ${{ github.event.workflow_run.head_sha }}.</sub>"
