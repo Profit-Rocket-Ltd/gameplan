@@ -9,7 +9,7 @@
       />
     </SpaceHeaderActions>
     <SpaceHeaderActions>
-      <template v-if="canEditSpace && !isBulkMoveMode">
+      <template v-if="canStartDiscussion && !isBulkMoveMode">
         <Button
           variant="solid"
           icon-left="lucide-plus"
@@ -41,13 +41,19 @@
         </Button>
       </template>
     </SpaceHeaderActions>
-    <div class="mb-4 flex items-center">
+    <div class="mb-4 flex items-center justify-between">
       <SpaceTabs :spaceId="spaceId" />
+      <Select
+        class="shrink-0 !w-fit"
+        :options="discussionSortOptions"
+        v-model="discussionOrderBy"
+      />
     </div>
     <DiscussionList
       class="-mx-3"
       ref="discussionListRef"
       :filters="() => ({ project: spaceId })"
+      :orderBy="() => discussionOrderBy"
       :cacheKey="`SpaceDiscussions-${spaceId}`"
       :selectable="isBulkMoveMode"
       v-model:selectedDiscussions="selectedDiscussions"
@@ -84,20 +90,25 @@
 <script setup lang="ts">
 import { computed, ref, useTemplateRef } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Combobox, Dialog, ErrorMessage, useCall, toast } from 'frappe-ui'
+import { Combobox, Dialog, ErrorMessage, Select, useCall, toast } from 'frappe-ui'
 import DiscussionList from '@/components/DiscussionList.vue'
 import SpaceHeaderActions from '@/components/SpaceHeaderActions.vue'
 import SpaceTabs from '@/components/SpaceTabs.vue'
 import DropdownMoreOptions from '@/components/DropdownMoreOptions.vue'
 import SpaceAccessDialog from '@/components/SpaceAccessDialog.vue'
+import PushPin from '@/components/icons/PushPin.vue'
+import PushPinSlash from '@/components/icons/PushPinSlash.vue'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
+import { isSpacePinned, toggleSpacePinned } from '@/data/pinnedSpaces'
 import { useCommunity } from '@/data/communities'
+import { discussionOrderBy, discussionSortOptions } from '@/data/discussionSort'
 import { useSessionUser } from '@/data/users'
 import { canManageCommunity } from '@/utils/permissions'
 import { showCommunitiesSettings } from '@/components/Settings'
 import {
   useSpace,
   useSpacePermissions,
+  canPostInSpace,
   spaces,
   hasJoined,
   joinSpace,
@@ -131,11 +142,14 @@ const router = useRouter()
 const {
   space: currentSpace,
   isArchived,
-  canEditSpace,
+  canEditSettings,
   canManageAccess,
   canChangeMembership,
   canMoveDiscussions,
 } = useSpacePermissions(() => props.spaceId)
+// Not `canEditSettings`: that one is about administering the space, and posting is open
+// to every member of a live space — but not to a guest, who cannot start a discussion.
+const canStartDiscussion = computed(() => canPostInSpace(currentSpace.value))
 const isJoined = computed(() => hasJoined(props.spaceId))
 const showSpaceAccessDialog = ref(false)
 
@@ -146,6 +160,11 @@ const community = useCommunity(() => currentSpace.value?.team)
 const canManageCurrentCommunity = computed(() => canManageCommunity(community.value, sessionUser))
 
 const spaceActions = computed(() => [
+  {
+    label: isSpacePinned(props.spaceId) ? 'Unpin space' : 'Pin space',
+    icon: isSpacePinned(props.spaceId) ? PushPinSlash : PushPin,
+    onClick: () => toggleSpacePinned(props.spaceId),
+  },
   {
     label: 'Settings',
     icon: 'lucide-settings',
@@ -187,9 +206,7 @@ const spaceActions = computed(() => [
     label: 'Archive',
     icon: 'lucide-archive',
     onClick: () => currentSpace.value && archiveSpace(currentSpace.value),
-    // Archiving is destructive — gate it behind manage access, mirroring Unarchive, so a
-    // regular member isn't offered (and can't submit) an action they lack permission for.
-    condition: () => canEditSpace.value && canManageAccess.value,
+    condition: () => canEditSettings.value,
   },
   {
     label: 'Unarchive',

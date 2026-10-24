@@ -2,12 +2,17 @@
 # See license.txt
 
 
+import json
+
 import frappe
 from frappe import _
 from frappe.query_builder.functions import Count
-from frappe.utils import split_emails, validate_email_address
+from frappe.utils import cint, split_emails, validate_email_address
 
 import gameplan
+from gameplan.gameplan.doctype.gp_invitation.gp_invitation import get_invitation, grant_access
+from gameplan.realtime import notify_notification_count_changed, unread_notification_count
+from gameplan.roles import GAMEPLAN_ROLES
 from gameplan.utils import validate_type
 
 
@@ -67,6 +72,7 @@ def get_user_info(user=None):
 			"is_image_background_removed",
 			"bio",
 			"community_order",
+			"pinned_spaces",
 			"quick_reaction_emojis",
 			"sidebar_badge_style",
 			"email_digest_frequency",
@@ -82,12 +88,16 @@ def get_user_info(user=None):
 		user_profile = user_profile_map.get(user.name)
 		if user_profile:
 			user.user_profile = user_profile.name
-			user.user_image = user_profile.image
+			# Fall back to User.user_image when the profile has none, so an account that
+			# only ever set an avatar through Frappe keeps it. Email digests already
+			# resolve avatars this way (see gameplan.email_digest.get_user_avatar_map).
+			user.user_image = user_profile.image or user.user_image
 			user.image_background_color = user_profile.image_background_color
 			user.is_image_background_removed = user_profile.is_image_background_removed
 			user.bio = user_profile.bio
 			if frappe.session.user == user.name:
 				user.community_order = user_profile.community_order
+				user.pinned_spaces = user_profile.pinned_spaces
 				user.quick_reaction_emojis = user_profile.quick_reaction_emojis
 				user.sidebar_badge_style = user_profile.sidebar_badge_style
 				user.email_digest_frequency = user_profile.email_digest_frequency
@@ -95,7 +105,8 @@ def get_user_info(user=None):
 				user.email_digest_last_sent_on = user_profile.email_digest_last_sent_on
 		user_roles = [r.role for r in roles if r.parent == user.name]
 		user.role = None
-		for role in ["Gameplan Guest", "Gameplan Member", "Gameplan Admin"]:
+		# GAMEPLAN_ROLES is ordered by privilege, so the last match is the effective role.
+		for role in GAMEPLAN_ROLES:
 			if role in user_roles:
 				user.role = role
 
@@ -115,24 +126,68 @@ def get_user_info(user=None):
 @validate_type
 def invite_by_email(emails: str, role: str, projects: list = None):
 	require_admin()
-	if role not in ["Gameplan Guest", "Gameplan Member", "Gameplan Admin"]:
+	if role not in GAMEPLAN_ROLES:
 		frappe.throw(_("Invalid role: {0}").format(role), frappe.ValidationError)
 	return _invite_by_email(emails, role, projects)
 
 
-def _invite_by_email(emails: str, role: str, projects: list = None):
+@frappe.whitelist(methods=["POST"])
+@validate_type
+def change_user_role(user: str, role: str):
+	require_admin()
+	if role not in GAMEPLAN_ROLES:
+		frappe.throw(_("Invalid role: {0}").format(role), frappe.ValidationError)
+
+	user_doc = frappe.get_doc("User", user)
+	for _role in list(user_doc.roles):
+		if _role.role in GAMEPLAN_ROLES:
+			user_doc.remove(_role)
+	user_doc.append_roles(role)
+	# Admin-gated by require_admin() above; bypass User's own permission checks so an
+	# admin can change another user's roles.
+	user_doc.save(ignore_permissions=True)
+
+	return get_user_info(user)[0]
+
+
+@frappe.whitelist(methods=["POST"])
+@validate_type
+def disable_user(user: str):
+	require_admin()
+
+	user_doc = frappe.get_doc("User", user)
+	user_doc.enabled = 0
+	# Admin-gated by require_admin() above; bypass User's own permission checks so an
+	# admin can disable another user.
+	user_doc.save(ignore_permissions=True)
+
+	return user
+
+
+def _invite_by_email(emails: str, role: str, projects: list = None) -> dict:
 	"""Core invite logic, callable from trusted server code (e.g. onboarding).
 
 	The public invite_by_email wrapper adds the admin gate + role allowlist; this
 	helper assumes the caller has already authorized the invite and validated role.
+
+	Two outcomes, split on whether the person already has an account here:
+
+	No account: send the invitation email. Its link is what mints the User.
+
+	An enabled account with no Gameplan role: grant the role now. The email link would
+	create nothing and set no password, and an OAuth account (which is how people reach
+	this state) would be sent to /update-password for no reason.
+
+	Returns the three buckets so the caller can tell the admin what happened.
 	"""
+	result = {"granted": [], "invited": [], "skipped": []}
 	if not emails:
-		return
+		return result
 	email_string = validate_email_address(emails, throw=False)
 	email_list = split_emails(email_string)
 	if not email_list:
-		return
-	existing_members = frappe.db.get_all("User", filters={"email": ["in", email_list]}, pluck="email")
+		return result
+	already_in_gameplan = emails_holding_a_gameplan_role(email_list)
 	existing_invites = frappe.db.get_all(
 		"GP Invitation",
 		filters={
@@ -143,57 +198,113 @@ def _invite_by_email(emails: str, role: str, projects: list = None):
 	)
 
 	if role == "Gameplan Guest":
-		to_invite = list(set(email_list) - set(existing_invites))
+		to_invite = set(email_list) - set(existing_invites)
 	else:
-		to_invite = list(set(email_list) - set(existing_members) - set(existing_invites))
+		to_invite = set(email_list) - set(already_in_gameplan) - set(existing_invites)
 
+	accounts = existing_accounts(to_invite)
+	grantable = {email for email, enabled in accounts.items() if enabled}
+	# A disabled account is neither granted nor invited. The role would change nothing
+	# while the account cannot sign in, and mailing it an invite link is worse: accept()
+	# would hand the role to an account someone deliberately switched off.
+	to_invite -= set(accounts) - grantable
+
+	result["skipped"] = sorted(set(email_list) - to_invite)
 	if projects:
 		projects = frappe.as_json(projects, indent=None)
 
-	for email in to_invite:
-		frappe.get_doc(doctype="GP Invitation", email=email, role=role, projects=projects).insert(
-			ignore_permissions=True
-		)
+	for email in sorted(to_invite):
+		if email in grantable:
+			grant_access(email, role, projects)
+			result["granted"].append(email)
+		else:
+			frappe.get_doc(doctype="GP Invitation", email=email, role=role, projects=projects).insert(
+				ignore_permissions=True
+			)
+			result["invited"].append(email)
+
+	return result
+
+
+def existing_accounts(email_list) -> dict:
+	"""Map each email that already has a User on this site to whether it is enabled.
+
+	An enabled account can sign in today, so its owner needs a role, not an invitation.
+	A disabled one needs neither.
+	"""
+	email_list = list(email_list)
+	if not email_list:
+		return {}
+	rows = frappe.qb.get_query(
+		"User",
+		filters={"email": ["in", email_list]},
+		fields=["email", "enabled"],
+	).run(as_dict=True)
+	return {row.email: bool(row.enabled) for row in rows}
+
+
+def emails_holding_a_gameplan_role(email_list: list) -> list:
+	"""The subset of `email_list` whose User already holds a Gameplan role.
+
+	A member invite skips these, because the invitation would grant a role they have.
+	It must not skip every existing User: signing in through OAuth mints a Website User
+	with no role at all, so an account can exist on the site while its owner has no way
+	into Gameplan. Those people need the invite; `accept()` adds the role to the account
+	they already have.
+	"""
+	User = frappe.qb.DocType("User")
+	HasRole = frappe.qb.DocType("Has Role")
+	return (
+		frappe.qb.from_(User)
+		.join(HasRole)
+		.on((HasRole.parent == User.name) & (HasRole.parenttype == "User"))
+		.select(User.email)
+		.where(User.email.isin(email_list))
+		.where(HasRole.role.isin(GAMEPLAN_ROLES))
+		.run(pluck=True)
+	)
 
 
 @frappe.whitelist()
 def unread_notifications():
-	res = frappe.db.get_all(
-		"GP Notification",
-		[{"COUNT": "name", "as": "count"}],
-		{"to_user": frappe.session.user, "read": 0},
-	)
-	return res[0].count
+	return unread_notification_count(frappe.session.user)
 
 
 # Invitation emails open in a browser navigation, so this endpoint must remain GET-reachable.
 @frappe.whitelist(allow_guest=True)
 @validate_type
 def accept_invitation(key: str = None):
-	if not key:
-		frappe.throw("Invalid or expired key")
+	invitation = get_invitation(key)
+	if not invitation or invitation.status not in ("Pending", "Accepted"):
+		frappe.respond_as_web_page(
+			_("This invitation link is no longer valid"),
+			_("Ask the person who invited you to send a new invitation."),
+			http_status_code=404,
+		)
+		return
 
-	result = frappe.db.get_all("GP Invitation", filters={"key": key}, pluck="name")
-	if not result:
-		frappe.throw("Invalid or expired key")
+	if invitation.status == "Pending":
+		invitation.accept()
+		# An account that was here before the invitation signs in the way it always has.
+		location = invitation.get_password_link() if invitation.created_account else "/g"
+	elif invitation.created_account_awaits_password():
+		# The invitee opened the link again before setting a password, so give them a new
+		# password link in place of the first one.
+		location = invitation.get_password_link()
+	else:
+		frappe.respond_as_web_page(
+			_("This invitation link is no longer valid"),
+			_("This invitation has already been accepted. Sign in to continue."),
+			http_status_code=410,
+			primary_action="/login",
+			primary_label=_("Sign in"),
+		)
+		return
 
-	invitation = frappe.get_doc("GP Invitation", result[0])
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
-	invitation.accept()
-	invitation.reload()
-
-	user = frappe.get_doc("User", invitation.email)
-	needs_password_setup = user and not user.last_password_reset_date
-
-	if invitation.status == "Accepted":
-		if needs_password_setup:
-			url = invitation.get_password_link()
-			frappe.local.response["type"] = "redirect"
-			frappe.local.response["location"] = f"{url}"
-		else:
-			frappe.local.login_manager.login_as(invitation.email)
-			frappe.local.response["type"] = "redirect"
-			frappe.local.response["location"] = "/g"
+	frappe.local.response["type"] = "redirect"
+	frappe.local.response["location"] = location
 
 
 @frappe.whitelist()
@@ -214,11 +325,16 @@ def mark_all_notifications_as_read():
 		.set(Notification.read, 1)
 		.where((Notification.to_user == frappe.session.user) & (Notification.read == 0))
 	).run()
-	gameplan.refetch_resource("Unread Notifications Count", user=frappe.session.user)
+	notify_notification_count_changed(frappe.session.user)
 
 
 @frappe.whitelist(methods=["POST"])
 def onboarding(community, space, icon, emails, is_private=0):
+	# Onboarding sets up a brand-new site. After that, communities and invitations go
+	# through their own screens and checks.
+	if not gameplan.is_new_site():
+		frappe.throw(_("This site is already set up"), frappe.PermissionError)
+
 	emails = frappe.parse_json(emails)
 
 	# Create the community. The GP Team after_insert hook auto-creates a public
@@ -235,9 +351,10 @@ def onboarding(community, space, icon, emails, is_private=0):
 		doctype="GP Project", title=space, icon=icon, team=team.name, is_private=is_private
 	).insert()
 
-	# Trusted internal path: the signup creator invites their first teammates as
-	# Members. Bypasses the admin gate (the creator isn't an admin yet) but the
-	# role is hardcoded, so no escalation is possible.
+	# The signup creator invites their first teammates. The creator may not be an admin
+	# yet, so this skips invite_by_email's admin check. The guard above limits it to a new
+	# site, and the role is fixed to Gameplan Member. GP Invitation's own rule that only
+	# admins invite admins still applies to these invitations.
 	_invite_by_email(", ".join(emails), role="Gameplan Member")
 	return {"team": team.name, "space": project.name}
 
@@ -279,8 +396,67 @@ def can_access_gameplan():
 		return False
 
 	roles = set(frappe.get_roles())
-	allowed_roles = set(["System Manager", "Gameplan Admin", "Gameplan Member", "Gameplan Guest"])
+	allowed_roles = {"System Manager", *GAMEPLAN_ROLES}
 	if roles.intersection(allowed_roles):
 		return True
 
 	return False
+
+
+CLIENT_ERROR_QUOTA = 20
+CLIENT_ERROR_QUOTA_WINDOW = 60 * 60
+CLIENT_ERROR_FIELD_LIMIT = 4000
+
+
+@frappe.whitelist(methods=["POST"])
+@validate_type
+def log_client_error(message: str, context: dict = None):
+	"""Record a browser-side error in the Error Log.
+
+	The UI catches most request failures and shows a message instead of raising, so a
+	report like "it did not post the first time" leaves no trace on the server. The
+	frontend sends those caught errors here together with the stack and the action that
+	failed, which is what makes them diagnosable after the fact.
+
+	The payload is attacker-controlled: it is truncated, stored as plain text, and each
+	user gets an hourly quota so a looping client cannot fill the Error Log.
+	"""
+	if _client_error_quota_spent():
+		return
+
+	action = _error_action(context)
+	title = f"Gameplan client error: {action}" if action else "Gameplan client error"
+
+	body = [_truncate(message)]
+	if context:
+		body.append("Context:\n" + _truncate(json.dumps(context, indent=2, default=str)))
+	frappe.log_error(title=title, message="\n\n".join(body))
+
+
+def _error_action(context: dict | None) -> str:
+	"""The action label for the log title. Kept to one short line: frappe.log_error treats a
+	multi-line title as a traceback and swaps its arguments."""
+	action = context.get("action") if isinstance(context, dict) else None
+	if not isinstance(action, str):
+		return ""
+	return " ".join(action.split())[:100]
+
+
+def _client_error_quota_spent() -> bool:
+	"""Whether this user has already used up their hourly client-error budget.
+
+	Read-then-write rather than an atomic counter: two reports racing can slip one past
+	the cap, which is fine for a throttle whose only job is to bound the row count.
+	"""
+	key = f"gameplan:client-error-count:{frappe.session.user}"
+	cache = frappe.cache()
+	count = cint(cache.get_value(key))
+	if count >= CLIENT_ERROR_QUOTA:
+		return True
+	cache.set_value(key, count + 1, expires_in_sec=CLIENT_ERROR_QUOTA_WINDOW)
+	return False
+
+
+def _truncate(value: str, limit: int = CLIENT_ERROR_FIELD_LIMIT) -> str:
+	value = str(value or "")
+	return value if len(value) <= limit else value[:limit] + "… (truncated)"

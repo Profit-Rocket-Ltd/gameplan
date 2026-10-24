@@ -25,10 +25,10 @@
             :aria-activedescendant="activeItemId"
           />
         </div>
-        <div
+        <ScrollArea
           :id="commandPaletteListId"
-          ref="scrollContainerRef"
-          class="max-h-96 overflow-auto border-t border-outline-gray-1 dark:border-outline-gray-2"
+          viewport-class="max-h-96"
+          class="border-t border-outline-gray-1 dark:border-outline-gray-2"
           role="listbox"
           aria-label="Command palette results"
           @click="inputRef?.focus()"
@@ -57,7 +57,7 @@
                 :id="getCommandPaletteItemElementId(item)"
                 @click="onSelection(item)"
                 @mousemove="onItemMouseMove(item, $event)"
-                class="rounded"
+                class="rounded-4"
                 :class="[item.isActive ? 'bg-surface-gray-3' : '']"
                 role="option"
                 :aria-selected="item.isActive ? 'true' : 'false'"
@@ -72,7 +72,7 @@
               </div>
             </div>
           </div>
-        </div>
+        </ScrollArea>
       </div>
       <div
         class="mt-2 flex items-center justify-between border-t border-outline-gray-1 px-2.5 py-2 text-xs text-ink-gray-6 dark:border-outline-gray-2"
@@ -109,9 +109,9 @@
 
 <script setup lang="ts">
 import { h, ref, computed, onBeforeUnmount, watch, nextTick, markRaw, useTemplateRef } from 'vue'
-import { useEventListener } from '@vueuse/core'
+import { useEventListener, useMediaQuery } from '@vueuse/core'
 import { useRouter } from 'vue-router'
-import { Dialog, dayjs, debounce, useCall, useNewDoc } from 'frappe-ui'
+import { Dialog, ScrollArea, dayjs, debounce, useCall, useNewDoc } from 'frappe-ui'
 import { activeUsers, isGameplanAdmin, useSessionUser, useUser } from '@/data/users'
 import ItemProject from './ItemProject.vue'
 import Item from './Item.vue'
@@ -127,7 +127,6 @@ import KeyboardShortcut from '../KeyboardShortcut.vue'
 import { showNewTaskDialog } from '../NewTaskDialog'
 import { GPPage } from '@/types/doctypes'
 import { showCommunitiesSettings, showSettingsDialog } from '@/components/Settings'
-import { useCanManageCommunities } from '@/composables/useCanManageCommunities'
 import {
   registeredCommands,
   type CommandPaletteGroup,
@@ -139,13 +138,11 @@ import { useCommandPaletteSearch } from './useCommandPaletteSearch'
 
 const query = ref('')
 const inputRef = useTemplateRef<HTMLInputElement>('inputRef')
-const scrollContainerRef = useTemplateRef<HTMLDivElement>('scrollContainerRef')
 const activeItemRef = ref<HTMLDivElement | null>(null)
 const commandPaletteListId = 'command-palette-listbox'
 
 const router = useRouter()
 const sessionUser = useSessionUser()
-const canManageCommunities = useCanManageCommunities()
 const activeCommunityIds = computed(
   () => new Set(activeCommunities.value.map((community) => community.name)),
 )
@@ -157,6 +154,9 @@ const currentSpace = computed(() => {
   return typeof spaceId === 'string' ? getSpace(spaceId) : null
 })
 const canCreateFromPalette = computed(() => !readOnlyMode && !currentSpace.value?.archived_at)
+// The profile customize page needs an editor panel beside the canvas, so it only
+// renders from `md` up. Read inside a condition so `shortcuts` re-evaluates on resize.
+const canCustomizeProfile = useMediaQuery('(min-width: 768px)')
 const normalizedQuery = computed(() => query.value.trim())
 const serverSearchQuery = ref('')
 const serverSearchResults = ref<SearchResult[]>([])
@@ -288,7 +288,7 @@ const shortcuts = computed((): CommandPaletteGroup[] => [
         icon: 'lucide-user-pen',
         aliases: ['profile bento', 'edit profile'],
         route: { name: 'ProfileCustomize' },
-        condition: () => useUser().isNotGuest,
+        condition: () => useUser().isNotGuest && canCustomizeProfile.value,
       },
     ].filter((item) => (item.condition ? item.condition() : true)),
   },
@@ -335,7 +335,8 @@ const shortcuts = computed((): CommandPaletteGroup[] => [
         search: 'Settings Communities manage communities manage spaces spaces settings',
         aliases: ['communities settings', 'manage spaces', 'spaces settings'],
         onClick: () => showCommunitiesSettings(),
-        condition: () => canManageCommunities.value,
+        // Matches the Communities settings tab: everyone browses it, to join or leave.
+        condition: () => !sessionUser.isGuest,
       },
       {
         title: 'Users',
@@ -424,19 +425,22 @@ const shortcuts = computed((): CommandPaletteGroup[] => [
             newPage.doc.project = spaceId as string
           }
 
-          newPage.submit().then((doc) => {
-            router.push({
-              name: doc.project ? 'SpacePage' : 'Page',
-              params: doc.project
-                ? {
-                    communityId: getSpace(doc.project)?.team,
-                    pageId: doc.name,
-                    slug: doc.slug,
-                    spaceId: doc.project,
-                  }
-                : { pageId: doc.name, slug: doc.slug },
+          newPage
+            .submit()
+            .then((doc) => {
+              router.push({
+                name: doc.project ? 'SpacePage' : 'Page',
+                params: doc.project
+                  ? {
+                      communityId: getSpace(doc.project)?.team,
+                      pageId: doc.name,
+                      slug: doc.slug,
+                      spaceId: doc.project,
+                    }
+                  : { pageId: doc.name, slug: doc.slug },
+              })
             })
-          })
+            .catch(() => {})
         },
       },
     ].filter((item) => (item.condition ? item.condition() : true)),
@@ -464,6 +468,17 @@ function groupRegisteredCommands() {
 
   return groups
 }
+
+/**
+ * Every person appears once per destination, titled "<name> / <tab>" so the name a query
+ * matches on stays at the front. The three rows share a cluster key, which holds them
+ * together in the results instead of letting another person's rows slot between them.
+ */
+const personTabs = [
+  { route: 'PersonProfileProfile', label: 'Profile', keywords: 'profile about bio' },
+  { route: 'PersonProfilePosts', label: 'Posts', keywords: 'posts discussions written' },
+  { route: 'PersonProfileReplies', label: 'Replies', keywords: 'replies comments' },
+] as const
 
 const searchList = computed(() => {
   let list: CommandPaletteItem[] = []
@@ -499,19 +514,22 @@ const searchList = computed(() => {
   }
 
   for (const user of activeUsers.value) {
-    list.push({
-      type: 'People',
-      group: 'people',
-      doctype: 'GP User Profile',
-      name: user.name,
-      title: user.full_name,
-      search: `${user.full_name} ${user.email}`,
-      icon: () => h(UserAvatar, { user: user.email, size: 'sm' }),
-      route: {
-        name: 'PersonProfileProfile',
-        params: { personId: user.user_profile },
-      },
-    })
+    for (const tab of personTabs) {
+      list.push({
+        type: 'People',
+        group: 'people',
+        cluster: user.name,
+        doctype: 'GP User Profile',
+        name: `${user.name}:${tab.route}`,
+        title: `${user.full_name} / ${tab.label}`,
+        search: `${user.full_name} ${user.email} ${tab.keywords}`,
+        icon: () => h(UserAvatar, { user: user.email, size: 'sm' }),
+        route: {
+          name: tab.route,
+          params: { personId: user.user_profile },
+        },
+      })
+    }
   }
   return list
 })
@@ -587,9 +605,10 @@ async function submitTitleSearch() {
     return
   }
 
-  const response = await (titleSearch.submit({ query: submittedQuery }) as Promise<
-    SearchResult[] | null
-  >)
+  // A newer query supersedes this request, which then rejects; the check below drops it.
+  const response = await (
+    titleSearch.submit({ query: submittedQuery }) as Promise<SearchResult[] | null>
+  ).catch(() => null)
   if (submittedQuery !== normalizedQuery.value) return
 
   serverSearchQuery.value = submittedQuery

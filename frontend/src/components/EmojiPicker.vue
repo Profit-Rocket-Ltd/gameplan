@@ -9,7 +9,7 @@
     </template>
     <!-- shell (bg, radius, shadow, ring) is provided by Popover's PopoverPanel -->
     <template #default="{ close }">
-      <div class="h-96 w-96 overflow-y-auto pb-2.5">
+      <ScrollArea class="h-96 w-96" viewport-class="pb-2.5">
         <div class="flex gap-2 pb-1 px-2.5 pt-2.5">
           <div class="flex-1">
             <FormControl
@@ -32,7 +32,7 @@
               v-for="custom in filteredCustomEmojis"
               :key="custom.name"
               type="button"
-              class="flex h-8 w-8 items-center justify-center rounded-md p-1 hover:bg-surface-gray-2 focus:outline-none focus:ring-2 focus:ring-outline-gray-3"
+              class="flex h-8 w-8 items-center justify-center rounded-5 p-1 hover:bg-surface-gray-2 focus:outline-none focus:ring-2 focus:ring-outline-gray-3"
               :title="custom.title"
               @click="selectEmoji(custom.image, close)"
             >
@@ -51,7 +51,7 @@
               v-for="emoji in emojis"
               :key="emoji.description"
               type="button"
-              class="h-8 w-8 rounded-md p-1 text-4xl hover:bg-surface-gray-2 focus:outline-none focus:ring-2 focus:ring-outline-gray-3"
+              class="flex h-8 w-8 items-center justify-center rounded-5 p-1 text-3xl hover:bg-surface-gray-2 focus:outline-none focus:ring-2 focus:ring-outline-gray-3"
               :title="emoji.description"
               @click="selectEmoji(emoji.emoji, close)"
             >
@@ -59,14 +59,14 @@
             </button>
           </div>
         </div>
-      </div>
+      </ScrollArea>
     </template>
   </Popover>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Button, FormControl, Popover } from 'frappe-ui'
+import { Button, FormControl, Popover, ScrollArea } from 'frappe-ui'
 import { gemoji } from 'gemoji'
 import { getRandomNumber } from '@/utils'
 import { customEmojis } from '@/data/customEmojis'

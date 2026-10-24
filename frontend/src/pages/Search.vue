@@ -13,7 +13,8 @@
             <TextInput
               ref="searchInput"
               class="flex-1"
-              placeholder="Search or press / to focus"
+              placeholder="Start typing to Search"
+              aria-label="Search"
               v-focus
               :model-value="query"
               @update:model-value="updateQuery"
@@ -29,7 +30,7 @@
                     v-if="query"
                     @click="clearSearch"
                     aria-label="Clear search"
-                    class="p-1 size-6 grid place-content-center focus:outline-none focus:ring focus:ring-outline-gray-3 rounded"
+                    class="p-1 size-6 grid place-content-center focus:outline-none focus:ring focus:ring-outline-gray-3 rounded-4"
                   >
                     <span class="lucide-x w-4 text-ink-gray-7" />
                   </button>
@@ -39,7 +40,7 @@
           </div>
 
           <!-- Filter Panel -->
-          <div class="overflow-x-auto -mx-3 px-3 pt-2">
+          <ScrollArea orientation="horizontal" class="-mx-3" viewport-class="px-3 pt-2">
             <div class="flex gap-2 items-center">
               <!-- Authors Filter -->
               <MultiSelect
@@ -154,7 +155,7 @@
                 </template>
               </MultiSelect>
             </div>
-          </div>
+          </ScrollArea>
           <!-- Soft fade so results dissolve into the toolbar as they scroll under. -->
           <div
             class="pointer-events-none absolute inset-x-0 top-full h-6 bg-gradient-to-b from-surface-base/90 to-transparent"
@@ -232,7 +233,7 @@
             <ListRow
               v-for="item in visibleSearchResults"
               :key="item.id"
-              :to="getItemRoute(item)"
+              :route="getItemRoute(item)"
               class="py-3 touch-pan-y overflow-hidden"
             >
               <ListCell class="self-start">
@@ -280,6 +281,7 @@ import {
   Breadcrumbs,
   Button,
   MultiSelect,
+  ScrollArea,
   TextInput,
   Tooltip,
   dayjs,
@@ -294,7 +296,7 @@ import UserAvatarWithHover from '@/components/UserAvatarWithHover.vue'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
 import { getSpace } from '@/data/spaces'
 import { activeCommunities } from '@/data/communities'
-import { activeUsers } from '@/data/users'
+import { users } from '@/data/users'
 import { vFocus } from '@/directives'
 
 // Type Definitions
@@ -472,12 +474,16 @@ const authorsFilterOptions = computed(() => {
     })
   }
 
-  return activeUsers.value.map((user) => ({
-    value: user.name,
-    label: user.full_name,
-    image: user.user_image,
-    count: authorCounts.get(user.name) || 0,
-  }))
+  // Disabled users stay in the list while they have indexed posts, so older posts
+  // by people who have left can still be found by author.
+  return (users.data || [])
+    .filter((user) => user.enabled || authorCounts.get(user.name))
+    .map((user) => ({
+      value: user.name,
+      label: user.full_name,
+      image: user.user_image,
+      count: authorCounts.get(user.name) || 0,
+    }))
 })
 
 const doctypesFilterOptions = computed(() => {
@@ -542,7 +548,7 @@ function handleKeyPress(event: KeyboardEvent) {
 }
 
 function focusSearchInput() {
-  searchInput.value?.el?.focus()
+  searchInput.value?.focus()
 }
 
 function isSearchCharacter(event: KeyboardEvent) {
@@ -610,7 +616,7 @@ const submit = debounce(function (text?: string) {
     params.filters = JSON.stringify(activeFilters.value)
   }
 
-  search.submit(params)
+  search.submit(params).catch(() => {})
 }, 300)
 
 function clearSearch() {
@@ -786,9 +792,12 @@ function submitFeedback(isHelpful: boolean) {
     query: query.value,
   })
 
-  feedback.submit().then(() => {
-    feedbackGiven.value = true
-  })
+  feedback
+    .submit()
+    .then(() => {
+      feedbackGiven.value = true
+    })
+    .catch(() => {})
 }
 </script>
 <style>

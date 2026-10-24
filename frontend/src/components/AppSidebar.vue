@@ -1,8 +1,8 @@
 <template>
   <Sidebar disable-collapse width="14rem">
     <template v-if="communityState.doc">
-      <div class="flex shrink-0 items-center p-2">
-        <AppDropdown />
+      <div class="flex shrink-0 items-center p-1.5">
+        <CommunityDropdown @new-space="openNewSpaceDialog" />
       </div>
 
       <!--
@@ -15,7 +15,7 @@
           <div class="flex h-7 items-center justify-between">
             <SidebarLabel>Spaces</SidebarLabel>
             <div v-if="!sessionUser.isGuest" class="flex items-center">
-              <Dropdown :options="spaceSortOptions" align="end">
+              <Dropdown :options="spaceSortMenuOptions" align="end">
                 <template #trigger="{ open }">
                   <Button
                     variant="ghost"
@@ -41,7 +41,7 @@
             <SidebarItem
               v-for="space in spacesList"
               :key="space.name"
-              :to="{ name: 'Space', params: { communityId: space.team, spaceId: space.name } }"
+              :route="{ name: 'Space', params: { communityId: space.team, spaceId: space.name } }"
               :active="isActiveSpace(space.name)"
             >
               <template #prefix>
@@ -49,8 +49,17 @@
               </template>
 
               <span class="flex-1 inline-flex items-center gap-1 truncate text-sm">
-                <LucideLock v-if="space.is_private" class="size-3 shrink-0 text-ink-gray-5" />
-                {{ space.title }}
+                <span
+                  v-if="space.is_private"
+                  class="lucide-lock size-3 shrink-0 text-ink-gray-5"
+                  aria-hidden="true"
+                />
+                <span class="truncate">{{ space.title }}</span>
+                <PushPin
+                  v-if="isSpacePinned(space.name)"
+                  class="size-3 shrink-0 text-ink-gray-5"
+                  aria-hidden="true"
+                />
               </span>
 
               <template #suffix>
@@ -113,56 +122,23 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { Button, Dropdown, Sidebar, SidebarItem, SidebarLabel, ScrollArea } from 'frappe-ui'
-import type { DropdownOptions } from 'frappe-ui'
 import { communityState } from '@/data/communityState'
 import { communitySpaces } from '@/data/communitySpaces'
-import {
-  currentHideInactiveSpaces,
-  currentSpaceSidebarSort,
-  setHideInactiveSpaces,
-  setSpaceSidebarSort,
-  type SpaceSidebarSort,
-} from '@/data/sidebarPreferences'
+import { hasCustomSpaceSidebarOptions, spaceSortMenuOptions } from '@/data/sidebarPreferences'
+import { isSpacePinned, toggleSpacePinned } from '@/data/pinnedSpaces'
 import { getSpaceUnreadCount, markAllAsRead, type Space } from '@/data/spaces'
 import { useSessionUser } from '@/data/users'
-import AppDropdown from './AppDropdown.vue'
+import CommunityDropdown from './CommunityDropdown.vue'
 import NewSpaceDialog from './NewSpaceDialog.vue'
 import SpaceIcon from './SpaceIcon.vue'
-import LucideLock from '~icons/lucide/lock'
+import PushPin from './icons/PushPin.vue'
+import PushPinSlash from './icons/PushPinSlash.vue'
 
 const route = useRoute()
 const sessionUser = computed(() => useSessionUser())
 
 const spacesList = computed(() => communitySpaces.list)
-const hasCustomSpaceSidebarOptions = computed(() => {
-  return currentSpaceSidebarSort.value !== 'Recent activity' || currentHideInactiveSpaces.value
-})
-
-const spaceSortOptions = computed<DropdownOptions>(() => [
-  {
-    group: 'Sort by',
-    options: spaceSortValues.map((sort) => ({
-      label: sort,
-      icon: currentSpaceSidebarSort.value === sort ? 'lucide-check' : null,
-      onClick: () => setSpaceSidebarSort(sort),
-    })),
-  },
-  {
-    group: 'Visibility',
-    options: [
-      {
-        label: 'Hide inactive spaces',
-        description: 'No activity for 2 months',
-        switch: true,
-        switchValue: currentHideInactiveSpaces.value,
-        onClick: setHideInactiveSpaces,
-      },
-    ],
-  },
-])
-
 const showNewSpaceDialog = ref(false)
-const spaceSortValues: SpaceSidebarSort[] = ['Recent activity', 'Alphabetical']
 
 const activeSpaceId = computed(() => {
   const routeName = route.name?.toString() || ''
@@ -182,7 +158,13 @@ function openNewSpaceDialog() {
 }
 
 function spaceOptions(space: Space) {
+  let pinned = isSpacePinned(space.name)
   return [
+    {
+      label: pinned ? 'Unpin space' : 'Pin space',
+      icon: pinned ? PushPinSlash : PushPin,
+      onClick: () => toggleSpacePinned(space.name),
+    },
     {
       label: 'Mark all as read',
       icon: 'lucide-check',

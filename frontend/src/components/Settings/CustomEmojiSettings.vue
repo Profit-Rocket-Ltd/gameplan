@@ -1,10 +1,12 @@
 <template>
-  <SettingsHeader>
+  <!-- No `title` prop: the header carries controls, so the panel keeps its own
+       heading and hides it on phones, where the page header names the tab. -->
+  <PanelHeader>
     <div class="flex flex-col gap-4">
-      <h2 class="text-lg-semibold text-ink-gray-8">Custom Emojis</h2>
+      <h2 class="text-md-semibold text-ink-gray-8 max-sm:hidden">Custom Emojis</h2>
       <div class="flex items-center justify-between gap-3">
         <TextInput
-          class="w-72"
+          class="min-w-0 flex-1 sm:w-72 sm:flex-none"
           placeholder="Search by title or keyword"
           :model-value="search"
           @input="search = $event.target.value"
@@ -13,22 +15,30 @@
             <span class="lucide-search h-4 w-4 text-ink-gray-4" />
           </template>
         </TextInput>
-        <Button icon-left="lucide-upload" @click="openUploadDialog">Upload</Button>
+        <!-- Icon alone on phones, where the search needs the width. -->
+        <Button
+          :icon="isPhone ? 'lucide-upload' : undefined"
+          :icon-left="isPhone ? undefined : 'lucide-upload'"
+          label="Upload"
+          @click="openUploadDialog"
+        />
       </div>
     </div>
 
+    <!-- Phones: one column with the keywords under the title, then the uploader and the
+         delete button; the column header goes. -->
     <div
       v-if="filteredEmojis.length"
-      class="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_6rem_2rem] items-center gap-3 border-b h-8 text-sm text-ink-gray-5"
+      class="mt-3 grid h-8 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_6rem_2rem] items-center gap-3 border-b text-sm text-ink-gray-5 max-sm:hidden"
     >
       <div>Emoji</div>
       <div>Keywords</div>
       <div>By</div>
       <div />
     </div>
-  </SettingsHeader>
+  </PanelHeader>
 
-  <SettingsBody>
+  <PanelBody>
     <div
       v-if="customEmojis.loading && !customEmojis.data?.length"
       class="py-8 text-center text-p-sm text-ink-gray-5"
@@ -44,17 +54,24 @@
       <div
         v-for="emoji in filteredEmojis"
         :key="emoji.name"
-        class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_6rem_2rem] items-center gap-3 py-2"
+        class="grid grid-cols-[minmax(0,1fr)_2rem_2rem] items-center gap-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_6rem_2rem] max-sm:py-3"
       >
         <div class="flex min-w-0 items-center gap-2">
           <img
             :src="emoji.image"
             :alt="emoji.title"
-            class="size-6 shrink-0 rounded object-contain"
+            class="size-6 shrink-0 rounded-4 object-contain"
           />
-          <span class="truncate text-base text-ink-gray-8">{{ emoji.title }}</span>
+          <div class="min-w-0">
+            <div class="truncate text-base text-ink-gray-8">{{ emoji.title }}</div>
+            <div v-if="emoji.keywords" class="truncate text-sm text-ink-gray-5 sm:hidden">
+              {{ emoji.keywords }}
+            </div>
+          </div>
         </div>
-        <div class="truncate text-base text-ink-gray-6">{{ emoji.keywords || '' }}</div>
+        <div class="truncate text-base text-ink-gray-6 max-sm:hidden">
+          {{ emoji.keywords || '' }}
+        </div>
         <div>
           <Tooltip :text="$user(emoji.owner).full_name">
             <UserAvatar :user="emoji.owner" size="sm" />
@@ -71,33 +88,29 @@
         </div>
       </div>
     </div>
-  </SettingsBody>
+  </PanelBody>
 
   <Dialog title="Upload emoji" v-model:open="showUploadDialog">
     <div class="space-y-4">
       <div class="flex items-center gap-3">
         <div
-          class="flex size-10 shrink-0 items-center justify-center rounded border border-outline-gray-2 bg-surface-gray-1"
+          class="flex size-10 shrink-0 items-center justify-center rounded-4 border border-outline-gray-2 bg-surface-gray-1"
         >
           <img
             v-if="form.image"
             :src="form.image"
             alt="Preview"
-            class="h-full w-full rounded-md object-contain"
+            class="h-full w-full rounded-5 object-contain"
           />
           <span v-else class="lucide-image size-5 text-ink-gray-4" />
         </div>
-        <FileUploader
-          :fileTypes="['image/png', 'image/jpeg', 'image/gif', 'image/webp']"
-          :uploadArgs="{ optimize: false }"
-          @success="(file: { file_url: string }) => (form.image = file.file_url)"
-        >
+        <ImageUploader kind="customEmoji" @success="(file) => (form.image = file.file_url)">
           <template #default="{ uploading, progress, openFileSelector }">
             <Button :loading="uploading" @click="openFileSelector">
               {{ uploading ? `${progress}%` : form.image ? 'Replace image' : 'Choose image' }}
             </Button>
           </template>
-        </FileUploader>
+        </ImageUploader>
       </div>
 
       <FormControl type="text" label="Title" placeholder="party-parrot" v-model="form.title" />
@@ -128,21 +141,15 @@
 // fallthrough (this component renders a fragment); it simply isn't emitted here.
 defineEmits<{ (e: 'close-dialog'): void }>()
 import { computed, ref } from 'vue'
-import {
-  Button,
-  Dialog,
-  ErrorMessage,
-  FileUploader,
-  FormControl,
-  SettingsBody,
-  SettingsHeader,
-  TextInput,
-  Tooltip,
-  toast,
-} from 'frappe-ui'
+import { Button, Dialog, ErrorMessage, FormControl, TextInput, Tooltip, toast } from 'frappe-ui'
+import PanelHeader from './PanelHeader.vue'
+import PanelBody from './PanelBody.vue'
 import { customEmojis, type CustomEmoji } from '@/data/customEmojis'
+import ImageUploader from '@/components/ImageUploader.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import { useIsMobile } from '@/utils/useIsMobile'
 
+const isPhone = useIsMobile()
 const search = ref('')
 const showUploadDialog = ref(false)
 const saving = ref(false)

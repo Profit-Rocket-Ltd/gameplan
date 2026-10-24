@@ -18,11 +18,11 @@ describe('Member management', () => {
     })
   })
 
-  // Opens the global Settings dialog via the sidebar app dropdown. For admins it
-  // opens on the first tab (Profile).
+  // Opens the global Settings dialog from the app menu on the logo, at the top of
+  // the rail. For admins it opens on the first tab (Profile).
   function openSettings() {
     cy.visit(`/g/community/${community}/discussions`)
-    cy.contains('button', 'Gameplan').click()
+    cy.iconButton('Gameplan menu').click()
     cy.contains('[role="menuitem"]', 'Settings').click()
     // The dialog title is a visually-hidden (sr-only) accessible label, so assert
     // presence rather than visibility.
@@ -50,8 +50,16 @@ describe('Member management', () => {
     // :visible — the Profile tab's Bio textarea stays mounted (hidden) in the
     // Settings dialog after switching tabs (unmount-on-hide=false).
     cy.scope('dialog').find('textarea:visible').type('newteammate@example.com')
-    cy.button('Send invitation').click()
+
+    // Two visible buttons read "Invite" once the dialog is open: the trigger on the
+    // Users tab behind it, and this submit. Scope to the InvitePeople dialog, which
+    // mounts after the Settings dialog, so it is the last one.
+    cy.scope('dialog').last().button('Invite').click()
     cy.wait('@invite').its('response.statusCode').should('eq', 200)
+
+    // The dialog reports the outcome per bucket. newteammate@example.com has no
+    // account on the site, so it takes the email path rather than a direct grant.
+    cy.scope('dialog').contains('1 invitation sent').should('be.visible')
 
     // On success the new invite shows in "Pending Invites". The Member role is
     // labelled "User" in the UI.
@@ -76,7 +84,7 @@ describe('Member management', () => {
 
   it('updates the sidebar when the current user becomes a guest', () => {
     cy.loginAs('admin')
-    cy.intercept('POST', '**/method/change_user_role').as('changeOwnRole')
+    cy.intercept('POST', '**/method/gameplan.api.change_user_role').as('changeOwnRole')
     openSettings()
     cy.scope('dialog').contains('button', 'Users').focus().type('{enter}')
     cy.contains('[data-slot="list-row"]', 'Administrator').should('be.visible')

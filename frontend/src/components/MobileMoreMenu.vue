@@ -3,7 +3,7 @@
     <div class="flex flex-col items-center text-center">
       <div
         v-if="sessionUser.name"
-        class="flex size-[120px] items-center justify-center overflow-hidden rounded-full bg-surface-gray-3 text-5xl-semibold text-ink-gray-7 shadow-sm"
+        class="flex size-[120px] items-center justify-center overflow-hidden rounded-full bg-surface-gray-3 text-4xl-semibold text-ink-gray-7 shadow-sm"
         :style="avatarStyle"
       >
         <img
@@ -14,10 +14,10 @@
         />
         <span v-else>{{ userInitials }}</span>
       </div>
-      <div class="mt-5 max-w-full truncate text-5xl-semibold text-ink-gray-9">
+      <div class="mt-5 max-w-full truncate text-4xl-semibold text-ink-gray-9">
         {{ sessionUser.full_name }}
       </div>
-      <p v-if="userBio" class="max-w-sm text-p-lg text-ink-gray-6">
+      <p v-if="userBio" class="max-w-sm text-p-md text-ink-gray-6">
         {{ userBio }}
       </p>
       <Button variant="ghost" size="lg" class="mt-2" @click="openProfile"> View profile </Button>
@@ -25,46 +25,62 @@
 
     <div class="mt-8 space-y-6">
       <section v-for="group in itemGroups" :key="group.label">
-        <div class="mb-2 pl-[18px] text-lg-medium text-ink-gray-5">
+        <div class="mb-2 pl-[18px] text-md-medium text-ink-gray-5">
           {{ group.label }}
         </div>
-        <nav class="overflow-hidden rounded-xl bg-surface-base">
+        <nav class="overflow-hidden rounded-7 bg-surface-base">
           <button
             v-for="(item, index) in group.items"
             :key="item.label"
             type="button"
-            class="flex min-h-14 w-full text-left transition active:bg-surface-gray-2"
+            class="block w-full text-left transition active:bg-surface-gray-2"
             @click="onItemClick(item)"
           >
-            <span class="flex w-14 shrink-0 items-center justify-center py-3">
-              <span :class="[item.icon, 'size-5 text-ink-gray-8']" aria-hidden="true" />
-            </span>
-            <span class="relative flex min-w-0 flex-1 items-center gap-3 py-3 pr-4">
-              <span
-                v-if="index > 0"
-                class="pointer-events-none absolute left-0 right-4 top-0 border-t"
-                aria-hidden="true"
-              />
-              <span class="min-w-0 flex-1 truncate text-lg text-ink-gray-9">
-                {{ item.label }}
+            <!--
+              The flex layout lives on this inner wrapper, not the <button>. iOS Safari
+              (WebKit) wraps a button's children in an anonymous box, so making the button
+              itself a flex container leaves the rows top-aligned instead of vertically
+              centered. Same pattern as MobileListRow.vue.
+            -->
+            <span class="flex min-h-14 w-full items-stretch">
+              <span class="flex w-14 shrink-0 items-center justify-center py-3">
+                <span :class="[item.icon, 'size-5 text-ink-gray-8']" aria-hidden="true" />
               </span>
-              <span v-if="item.value" class="shrink-0 text-md text-ink-gray-5">
-                {{ item.value }}
+              <span class="relative flex min-w-0 flex-1 items-center gap-3 py-3 pr-4">
+                <span
+                  v-if="index > 0"
+                  class="pointer-events-none absolute left-0 right-4 top-0 border-t"
+                  aria-hidden="true"
+                />
+                <span class="min-w-0 flex-1 truncate text-md text-ink-gray-9">
+                  {{ item.label }}
+                </span>
+                <span v-if="item.value" class="shrink-0 text-md text-ink-gray-5">
+                  {{ item.value }}
+                </span>
+                <span class="size-4 shrink-0 text-ink-gray-4 lucide-chevron-right" />
               </span>
-              <span class="size-4 shrink-0 text-ink-gray-4 lucide-chevron-right" />
             </span>
           </button>
         </nav>
       </section>
     </div>
+
+    <BottomSheet v-if="showDevUserSwitcher" v-model:open="devUserSheetOpen" title="Switch user">
+      <!-- Capped so the list scrolls on its own. The filter and the error panel
+           then stay in view instead of scrolling away. -->
+      <component :is="DevUserList" class="max-h-[70dvh] pb-6" @close="devUserSheetOpen = false" />
+    </BottomSheet>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 import { useRouter, type RouteLocationRaw } from 'vue-router'
-import { useSessionUser } from '@/data/users'
+import { BottomSheet } from 'frappe-ui'
+import { isGameplanAdmin, useSessionUser } from '@/data/users'
 import { session } from '@/data/session'
+import { useIsMobile } from '@/utils/useIsMobile'
 import { useTheme, type Theme } from '@/utils/useTheme'
 
 interface MoreItem {
@@ -83,6 +99,16 @@ interface MoreItemGroup {
 const router = useRouter()
 const sessionUser = useSessionUser()
 const { cycleTheme, currentTheme } = useTheme()
+// Same compile-time guard as the account menu (UserDropdown.vue): a production
+// build folds this to null and never bundles the list.
+const DevUserList = import.meta.env.DEV
+  ? defineAsyncComponent(() => import('@/components/DevUserList.vue'))
+  : null
+const devUserSheetOpen = ref(false)
+// This page still renders on a desktop viewport, where the account menu
+// (UserDropdown.vue) holds the switcher. One entry point per layout.
+const isMobileViewport = useIsMobile()
+const showDevUserSwitcher = computed(() => Boolean(DevUserList) && isMobileViewport.value)
 
 const THEME_META: Record<Theme, { label: string; icon: string }> = {
   light: { label: 'Light', icon: 'lucide-sun' },
@@ -121,16 +147,76 @@ const itemGroups = computed<MoreItemGroup[]>(() => {
     {
       label: 'Settings',
       items: [
-        { label: 'Profile', icon: 'lucide-user', onClick: openProfile },
+        // The settings tabs themselves, one level deep: each opens its panel full-screen.
+        // Same slugs and gating as the desktop dialog's sidebar (Settings/SettingsDialog.vue).
+        // "Profile" here is the settings tab (name, avatar, about); "View profile" above
+        // the list opens the public profile.
+        {
+          label: 'Profile',
+          icon: 'lucide-user',
+          route: { name: 'SettingsTab', params: { tab: 'profile' } },
+        },
+        {
+          label: 'Preferences',
+          icon: 'lucide-sliders-horizontal',
+          route: { name: 'SettingsTab', params: { tab: 'preferences' } },
+        },
+        {
+          label: 'Notifications',
+          icon: 'lucide-bell',
+          route: { name: 'SettingsTab', params: { tab: 'notifications' } },
+        },
+        ...(sessionUser.isGuest
+          ? []
+          : [
+              {
+                label: 'Communities',
+                icon: 'lucide-building-2',
+                route: { name: 'SettingsTab', params: { tab: 'communities' } },
+              },
+            ]),
+        ...(isGameplanAdmin()
+          ? [
+              {
+                label: 'Emojis',
+                icon: 'lucide-smile-plus',
+                route: { name: 'SettingsTab', params: { tab: 'emojis' } },
+              },
+              {
+                label: 'Users',
+                icon: 'lucide-users',
+                route: { name: 'SettingsTab', params: { tab: 'users' } },
+              },
+            ]
+          : []),
         {
           label: 'Theme',
           icon: THEME_META[currentTheme.value].icon,
           onClick: cycleTheme,
           value: THEME_META[currentTheme.value].label,
         },
-        { label: 'Log out', icon: 'lucide-log-out', onClick: () => session.logout.submit() },
+        {
+          label: 'Log out',
+          icon: 'lucide-log-out',
+          onClick: () => session.logout.submit().catch(() => {}),
+        },
       ],
     },
+    ...(showDevUserSwitcher.value
+      ? [
+          {
+            label: 'Developer',
+            items: [
+              {
+                label: 'Switch user',
+                icon: 'lucide-arrow-left-right',
+                onClick: () => (devUserSheetOpen.value = true),
+                value: sessionUser.full_name,
+              },
+            ],
+          },
+        ]
+      : []),
   ]
 })
 

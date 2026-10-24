@@ -1,15 +1,17 @@
 <template>
   <div v-if="communityGuests.length">
     <div class="mb-4">
-      <h2 class="text-lg-medium text-ink-gray-9">Guests</h2>
+      <h2 class="text-md-medium text-ink-gray-9">Guests</h2>
       <p class="mt-1 text-base text-ink-gray-5">
         Guests are invited to specific spaces and do not become community members.
       </p>
     </div>
 
     <List
-      :columns="['1.25rem', 'minmax(12rem,1fr)', 'minmax(12rem,1fr)', '8rem', '3rem']"
-      class="max-md:list-cols-[1.25rem_minmax(0,1fr)_2rem]"
+      :columns="{
+        base: ['1.5rem', 'minmax(0,1fr)', '2rem'],
+        md: ['1.25rem', 'minmax(12rem,1fr)', 'minmax(12rem,1fr)', '8rem', '3rem'],
+      }"
     >
       <ListHeader class="max-md:hidden">
         <ListHeaderCell class="col-span-2">Guest</ListHeaderCell>
@@ -17,7 +19,11 @@
         <ListHeaderCell>Spaces</ListHeaderCell>
         <ListHeaderCell />
       </ListHeader>
-      <ListRow v-for="guest in communityGuests" :key="guest.key" class="h-10">
+      <ListRow
+        v-for="guest in communityGuests"
+        :key="guest.key"
+        class="max-md:h-auto max-md:py-3 md:h-10"
+      >
         <ListCell>
           <UserAvatar :user="guest.user" size="sm" class="shrink-0" />
         </ListCell>
@@ -27,9 +33,8 @@
             <div class="truncate text-base-medium text-ink-gray-7">
               {{ guest.fullName }}
             </div>
-            <div class="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-base text-ink-gray-5 md:hidden">
-              <span>{{ guest.email }}</span>
-              <span>{{ guest.spacesLabel }}</span>
+            <div class="mt-0.5 truncate text-sm text-ink-gray-5 md:hidden">
+              {{ [guest.email, guest.spacesLabel].filter(Boolean).join(' · ') }}
             </div>
           </div>
         </ListCell>

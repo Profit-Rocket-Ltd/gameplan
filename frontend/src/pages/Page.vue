@@ -1,10 +1,13 @@
 <template>
   <div>
     <PageHeaderMobile class="sm:hidden" :title="pageTitle">
-      <template #left>
-        <PageHeaderBackButton :to="backRoute" :label="isSpacePage ? 'Pages' : 'My Pages'" />
+      <template #prefix>
+        <PageHeaderBackButton
+          :fallback-route="backRoute"
+          :label="isSpacePage ? 'Pages' : 'My Pages'"
+        />
       </template>
-      <template v-if="page.doc && canEditPage" #right>
+      <template v-if="page.doc && canEditPage" #suffix>
         <DropdownMoreOptions align="end" :options="pageActions" />
       </template>
     </PageHeaderMobile>
@@ -58,9 +61,9 @@
         <span class="text-sm text-ink-gray-5 sm:hidden">
           Updated {{ dayjsLocal(page.doc.modified).format('lll') }}
         </span>
-        <div class="mb-3 md:px-[70px]">
+        <div class="mb-3 md:px-[70px]" ref="titleField">
           <input
-            class="w-full border-0 p-0 pt-4 text-5xl-semibold focus:outline-none focus:ring-0 bg-surface-base text-ink-gray-8"
+            class="w-full border-0 p-0 pt-4 text-4xl-semibold focus:outline-none focus:ring-0 bg-surface-base text-ink-gray-8"
             type="text"
             v-model="title"
             :readonly="!canEditPage"
@@ -70,19 +73,21 @@
             placeholder="Title"
           />
         </div>
-        <PageEditor
-          editor-class="rounded-b-lg max-w-[unset] prose-v3 pb-[50vh] md:px-[70px]"
-          :content="content"
-          :editable="canEditPage"
-          @change="
-            (value) => {
-              content = value
-              autosave()
-            }
-          "
-          placeholder="Start writing here..."
-          ref="textEditor"
-        />
+        <div ref="contentField">
+          <PageEditor
+            editor-class="rounded-b-6 max-w-[unset] prose-v3 pb-[50vh] md:px-[70px]"
+            :content="content"
+            :editable="canEditPage"
+            @change="
+              (value) => {
+                content = value
+                autosave()
+              }
+            "
+            placeholder="Start writing here..."
+            ref="textEditor"
+          />
+        </div>
       </div>
     </div>
   </div>
@@ -101,6 +106,7 @@ import {
   dayjsLocal,
   useDoc,
   dialog,
+  toast,
 } from 'frappe-ui'
 import PageEditor from '@/components/editor/PageEditor.vue'
 import { useSpace } from '@/data/spaces'
@@ -112,6 +118,8 @@ import { relativeTimestamp } from '@/utils'
 import { useSessionUser } from '@/data/users'
 import { canDeleteContent, canEditContent } from '@/utils/permissions'
 import { useCommandPaletteCommands } from '@/components/CommandPalette/registry'
+import { useOwnedRouteWrites } from '@/composables/useOwnedRouteWrites'
+import { useSyncedField } from '@/utils/useSyncedField'
 const props = defineProps<{
   communityId?: string
   pageId: string
@@ -123,22 +131,45 @@ const route = useRoute()
 const router = useRouter()
 const history = window.history
 
+// This page also renders behind the settings overlay, where the URL belongs to /settings/*.
+// Rewriting it from there would both throw (no pageId param to spread) and navigate the app
+// off the settings route, closing the dialog. A page may only rewrite a URL it owns.
+const runWhenOwned = useOwnedRouteWrites(() => route.name === 'SpacePage' || route.name === 'Page')
+
 const titleInput = useTemplateRef('titleInput')
 const textEditor = useTemplateRef('textEditor')
-
-const title = ref('')
-const content = ref('')
+const titleField = useTemplateRef<HTMLElement>('titleField')
+const contentField = useTemplateRef<HTMLElement>('contentField')
 
 const page = useDoc<GPPage>({
   doctype: 'GP Page',
   name: () => props.pageId,
 })
 
-page.onSuccess((doc) => {
-  title.value = doc.title || ''
-  content.value = doc.content || ''
+// Read from the document, not from the fetch response. The body renders as soon
+// as `page.doc` arrives, which can be the cached copy the doc store publishes
+// before the network one. Seeding only on the response left the inputs rendered
+// and empty until it landed, and overwrote anything typed in that gap.
+// See useSyncedField for how the two publishes are told apart.
+const title = useSyncedField({
+  source: () => page.doc?.title,
+  identity: () => page.doc?.name,
+  target: titleField,
+})
+const content = useSyncedField({
+  source: () => page.doc?.content,
+  identity: () => page.doc?.name,
+  target: contentField,
+})
+
+page.onSuccess(() => {
   updateUrlSlug()
-  titleInput.value?.focus()
+  // Only when nobody is working yet: on a slow response the body has been
+  // interactive since the cached copy rendered, and pulling focus to the title
+  // would yank someone out of the editor mid-sentence.
+  if (!document.activeElement || document.activeElement === document.body) {
+    titleInput.value?.focus()
+  }
 })
 
 const isDirty = computed(() => {
@@ -201,6 +232,8 @@ const save = () => {
       title: title.value,
       content: content.value,
     })
+    // Autosave can fail on every pause in typing; the id keeps a single toast on screen.
+    .catch(() => toast.error('Could not save the page', { id: 'page-save' }))
     .finally(() => {
       const elapsedTime = Date.now() - startTime
       const remainingTime = Math.max(0, MIN_AUTOSAVING_DURATION - elapsedTime)
@@ -264,19 +297,29 @@ const handleKeyboardShortcuts = (e: KeyboardEvent) => {
   }
 }
 
+// Runs once per visit, when the doc resolves — so if the URL is not ours at that moment,
+// the correction has to wait for it rather than be dropped for the rest of the visit.
 const updateUrlSlug = () => {
-  if (!route.params.slug || route.params.slug !== page.doc?.slug) {
-    router.replace({
-      name: page.doc?.project ? 'SpacePage' : 'Page',
-      params: {
-        ...route.params,
-        communityId: page.doc?.project ? space.value?.team : undefined,
-        spaceId: page.doc?.project,
-        slug: page.doc?.slug,
-      },
-      query: route.query,
-    })
-  }
+  runWhenOwned(applyCanonicalSlug)
+}
+
+// Reads its state when it runs, not when it was queued, so a deferred correction can't
+// stamp the slug of the page we started on onto the page the URL ended up on.
+function applyCanonicalSlug() {
+  const doc = page.doc
+  if (!doc) return
+  if (route.params.slug && route.params.slug === doc.slug) return
+
+  router.replace({
+    name: doc.project ? 'SpacePage' : 'Page',
+    params: {
+      ...route.params,
+      communityId: doc.project ? space.value?.team : undefined,
+      spaceId: doc.project,
+      slug: doc.slug,
+    },
+    query: route.query,
+  })
 }
 
 onMounted(() => {

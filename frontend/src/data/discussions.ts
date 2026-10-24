@@ -1,4 +1,4 @@
-import { MaybeRefOrGetter, toValue, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { useDoc, useList } from 'frappe-ui'
 import { UseListOptions } from 'frappe-ui'
 import { useDocumentVisibility } from '@vueuse/core'
@@ -8,12 +8,31 @@ import { GPDiscussion } from '@/types/doctypes'
 // for at least this long, so new posts show up without a manual refresh.
 const STALE_RELOAD_THRESHOLD = 2 * 60 * 1000
 
+const reloadSignal = ref(0)
+
+/**
+ * Reload every mounted discussion feed.
+ *
+ * A row's read state comes from the list response, not from the unread-count store, so an
+ * action taken outside a feed (marking a whole community read from the sidebar) leaves the
+ * rows looking unread until they refetch. Callers used to reach into `DiscussionList` through
+ * a template ref, which only works while the action lives on the same page as the list.
+ */
+export function reloadDiscussionLists() {
+  reloadSignal.value++
+}
+
 export interface Discussion extends GPDiscussion {
   project_title: string
   last_post_at: string
   unread: number
   last_comment_content?: string
   last_poll_title?: string
+  bookmark?: string
+  bookmarked_comment?: string | null
+  bookmarked_post_by?: string
+  bookmarked_post_content?: string
+  bookmarked_post_at?: string
 }
 
 export type UseDiscussionOptions = Pick<
@@ -47,12 +66,20 @@ export function useDiscussions(options: UseDiscussionOptions) {
     discussions.reload()
   })
 
+  // Only feeds that have already loaded need a refresh; an untouched one fetches on demand.
+  watch(reloadSignal, () => {
+    if (!discussions.data) return
+    discussions.reload()
+  })
+
   return discussions
 }
 
 let discussionsCache: Record<string, ReturnType<typeof useDoc>> = {}
 
-export function useDiscussion(discussionId: MaybeRefOrGetter<string>) {
+// Cached per discussion, so the id is a plain string: a cached doc bound to a getter follows
+// whatever the getter returns later and ends up showing another discussion under this id.
+export function useDiscussion(name: string) {
   interface Discussion extends GPDiscussion {
     last_unread_comment: string
     last_unread_poll: string
@@ -72,11 +99,10 @@ export function useDiscussion(discussionId: MaybeRefOrGetter<string>) {
     moveToProject: (data: { project: string }) => void
   }
 
-  let name = toValue(discussionId)
   if (!discussionsCache[name]) {
     discussionsCache[name] = useDoc<Discussion, DiscussionMethods>({
       doctype: 'GP Discussion',
-      name: discussionId,
+      name,
       methods: {
         trackVisit: 'track_visit',
         markAsUnread: 'mark_as_unread',

@@ -26,9 +26,9 @@
           class="relative my-4"
           role="separator"
         >
-          <div class="border-b border-blue-600"></div>
+          <div class="border-b border-outline-gray-3"></div>
           <span
-            class="absolute -top-2 left-1/2 -translate-x-1/2 bg-surface-base px-2 text-sm-medium text-ink-blue-8"
+            class="absolute -top-2 left-1/2 -translate-x-1/2 bg-surface-base px-2 text-sm-medium text-ink-gray-7"
           >
             New comments
           </span>
@@ -36,7 +36,7 @@
         <Comment
           v-if="item.doctype == 'GP Comment'"
           :class="{
-            'pt-14 sm:pt-0': needsMobileCommentGap(timelineItems, i),
+            'pt-14 sm:pt-0': i > 0,
           }"
           :ref="($comment) => setItemRef($comment, item)"
           :comment="item"
@@ -60,7 +60,7 @@
         </div>
         <div class="relative w-full" v-show="!showCommentBox">
           <button
-            class="flex w-full items-center rounded-md border px-2 py-2 text-left text-base text-ink-gray-5 hover:border-outline-gray-3"
+            class="flex w-full items-center rounded-5 border px-2 py-2 text-left text-base text-ink-gray-5 hover:border-outline-gray-3"
             @click.stop="openCommentBox"
           >
             Add a comment
@@ -68,19 +68,27 @@
         </div>
         <div
           v-show="showCommentBox"
-          class="w-full rounded-lg border bg-surface-base p-4 focus-within:border-outline-gray-3"
+          class="w-full rounded-6 border bg-surface-base p-4 focus-within:border-outline-gray-3"
+          :aria-busy="isDraftLoading"
+          :inert="isDraftLoading"
           @keydown.ctrl.enter.capture.stop="submitComment"
           @keydown.meta.enter.capture.stop="submitComment"
         >
+          <div v-if="isDraftLoading" role="status" class="mb-2 text-sm text-ink-gray-5">
+            Loading draft…
+          </div>
           <div class="mb-4 flex items-center sm:hidden">
             <UserAvatar :user="$user().name" size="sm" />
             <span class="ml-2 text-base-medium text-ink-gray-8">
               {{ $user().full_name }}
             </span>
           </div>
+          <!-- Bounded: this composer is pinned under the comment list, so it scrolls
+               internally past 50vh rather than pushing the task's comments off screen. -->
           <CommentEditor
             ref="newCommentEditor"
-            :value="draftData.content"
+            max-height="50vh"
+            :value="draftData?.content"
             @change="onNewCommentChange"
             :submitButtonProps="{
               variant: 'solid',
@@ -91,7 +99,7 @@
             :discardButtonProps="{
               onClick: discardComment,
             }"
-            :editable="showCommentBox"
+            :editable="showCommentBox && !isDraftLoading"
             placeholder="Add a comment"
           />
           <ErrorMessage :message="comments.insert.error" />
@@ -108,8 +116,7 @@ import CommentEditor from '@/components/editor/CommentEditor.vue'
 import Comment from './Comment.vue'
 import Activity from './Activity.vue'
 import UserAvatar from './UserAvatar.vue'
-import { getScrollContainer } from 'frappe-ui'
-import { needsMobileCommentGap } from '@/utils/commentTimeline'
+import { shellScrollContainer } from 'frappe-ui'
 import { dialog } from 'frappe-ui'
 import { subscribeToDoc, useSocket, type NewActivityEvent } from '@/socket'
 import { GPActivity, GPComment } from '@/types/doctypes'
@@ -149,6 +156,7 @@ const draft = useDraftSync({
   initialPayload: () => ({ content: '' }),
 })
 const draftData = draft.data
+const isDraftLoading = draft.isLoading
 
 const newMessagesFrom = ref(props.newCommentsFrom)
 const highlightedItem = ref(null)
@@ -157,28 +165,12 @@ const newCommentEditor = ref(null)
 const comments = useList<
   Pick<
     GPComment,
-    | 'name'
-    | 'content'
-    | 'owner'
-    | 'creation'
-    | 'modified'
-    | 'edited_at'
-    | 'deleted_at'
-    | 'reactions'
+    'name' | 'content' | 'owner' | 'creation' | 'modified' | 'edited_at' | 'deleted_at'
   >
 >({
   doctype: 'GP Comment',
   cacheKey: ['Comments', props.doctype, props.name],
-  fields: [
-    'name',
-    'content',
-    'owner',
-    'creation',
-    'modified',
-    'edited_at',
-    'deleted_at',
-    { reactions: ['name', 'user', 'emoji'] },
-  ],
+  fields: ['name', 'content', 'owner', 'creation', 'modified', 'edited_at', 'deleted_at'],
   transform(data) {
     return data.map((d) => ({ ...d, name: d.name.toString(), doctype: 'GP Comment' }))
   },
@@ -307,7 +299,7 @@ const timelineItems = computed(() => {
 })
 
 const commentEmpty = computed(() => {
-  return !draftData.value.content || draftData.value.content === '<p></p>'
+  return !draftData.value?.content || draftData.value.content === '<p></p>'
 })
 
 const editorObject = computed(() => {
@@ -344,7 +336,7 @@ async function scrollToItem(item) {
 }
 
 function scrollToElement($el: HTMLElement) {
-  const scrollContainer = getScrollContainer()
+  const scrollContainer = shellScrollContainer.value
   if (!scrollContainer) return
   const headerHeight = 64
   const top = $el.offsetTop - scrollContainer.scrollTop - headerHeight
@@ -352,7 +344,7 @@ function scrollToElement($el: HTMLElement) {
 }
 
 function scrollToEnd() {
-  const scrollContainer = getScrollContainer()
+  const scrollContainer = shellScrollContainer.value
   if (!scrollContainer) return
   scrollContainer.scrollTop = scrollContainer.scrollHeight
 }
@@ -381,7 +373,7 @@ async function submitComment() {
   const comment = await comments.insert.submit({
     reference_doctype: props.doctype,
     reference_name: props.name,
-    content: draftData.value.content,
+    content: draftData.value?.content,
   })
   if (comments.insert.error || !comment?.name) return
 
@@ -390,6 +382,9 @@ async function submitComment() {
 }
 
 function onNewCommentChange(content: string) {
+  // The editor emits on mount, before the draft has resolved. There is no buffer to write
+  // into yet, and the composer is not editable, so the change is not the user's.
+  if (!draftData.value) return
   draftData.value.content = content
 }
 
@@ -410,9 +405,9 @@ watch(showCommentBox, (val) => {
 
 // Reopen the composer if a saved draft is restored for this task.
 watch(
-  () => draft.ready.value,
-  (ready) => {
-    if (ready && draft.restored.value) showCommentBox.value = true
+  draftData,
+  (payload) => {
+    if (payload && draft.restored.value) showCommentBox.value = true
   },
   { immediate: true },
 )
