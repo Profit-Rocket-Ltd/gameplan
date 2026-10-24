@@ -45,12 +45,16 @@ export interface GPTask extends DocType {
   comments_count?: number
 }
 
-// Last updated: 2023-01-16 13:19:48.202430
+// Last updated: 2026-09-10 10:00:00.000000
 export interface GPUserProfile extends DocType {
   /** User: Link (User) */
   user: string
   /** Readme: Text Editor */
   readme?: string
+  /** Bento Cards: Table (GP Profile Bento Card) */
+  bento_cards: GPProfileBentoCard[]
+  /** Layout Customized: Check */
+  layout_customized: 0 | 1
   /** Full Name: Data */
   full_name?: string
   /** Cover Image: Attach Image */
@@ -59,8 +63,22 @@ export interface GPUserProfile extends DocType {
   cover_image_position?: number
   /** Bio: Data */
   bio?: string
+  /** Image: Attach Image */
+  image?: string
+  /** Is Image Background Removed: Check */
+  is_image_background_removed: 0 | 1
+  /** Original Image: Attach Image */
+  original_image?: string
+  /** Image Background Color: Color */
+  image_background_color?: string
+  /** Enabled: Check */
+  enabled: 0 | 1
   /** Community Order: JSON */
-  community_order?: unknown
+  community_order?: any
+  /** Pinned Spaces: JSON */
+  pinned_spaces?: any
+  /** Quick Reaction Emojis: JSON */
+  quick_reaction_emojis?: any
   /** Sidebar Badge Style: Select */
   sidebar_badge_style?: 'Unread count' | 'Dot'
   /** Email Digest Frequency: Select */
@@ -76,16 +94,6 @@ export interface GPUserProfile extends DocType {
     | 'Sunday'
   /** Email Digest Last Sent On: Date */
   email_digest_last_sent_on?: string
-  /** Image: Attach Image */
-  image?: string
-  /** Is Image Background Removed: Check */
-  is_image_background_removed: 0 | 1
-  /** Original Image: Attach Image */
-  original_image?: string
-  /** Image Background Color: Color */
-  image_background_color?: string
-  /** Enabled: Check */
-  enabled: 0 | 1
 }
 
 // Last updated: 2024-02-06 12:18:02.871772
@@ -112,7 +120,7 @@ export interface GPMember extends ChildDocType {
   is_admin?: 0 | 1
 }
 
-// Last updated: 2026-02-01 13:07:33.079297
+// Last updated: 2026-07-31 10:15:00.000000
 export interface GPNotification extends DocType {
   /** From User: Link (User) */
   from_user?: string
@@ -138,7 +146,7 @@ export interface GPNotification extends DocType {
   team?: string
 }
 
-// Last updated: 2025-10-20 20:19:55.468697
+// Last updated: 2026-10-16 20:00:00.000000
 export interface GPDiscussion extends DocType {
   /** Project: Link (GP Project) */
   project: string
@@ -148,8 +156,6 @@ export interface GPDiscussion extends DocType {
   status?: string
   /** Title: Data */
   title: string
-  /** Reactions: Table (GP Reaction) */
-  reactions: GPReaction[]
   /** Team: Link (GP Team) */
   team?: string
   /** Last Post At: Datetime */
@@ -177,7 +183,7 @@ export interface GPDiscussion extends DocType {
   /** Tags: Table (GP Tag Link) */
   tags: GPTagLink[]
   /** Pin Scope: Select */
-  pin_scope?: 'Global' | 'Space'
+  pin_scope?: 'Category' | 'Space'
 }
 
 // Last updated: 2026-05-01 22:51:01.454329
@@ -262,15 +268,19 @@ export interface GPProject extends DocType {
   is_private: 0 | 1
 }
 
-// Last updated: 2022-08-11 18:36:55.799372
-export interface GPReaction extends ChildDocType {
+// Last updated: 2026-10-16 20:00:00.000000
+export interface GPReaction extends DocType {
+  /** Reference DocType: Link (DocType) */
+  reference_doctype: string
+  /** Reference Name: Dynamic Link (reference_doctype) */
+  reference_name: string
   /** Emoji: Data */
   emoji: string
   /** User: Data */
-  user?: string
+  user: string
 }
 
-// Last updated: 2025-08-31 23:29:54.697656
+// Last updated: 2026-10-16 20:00:00.000000
 export interface GPComment extends DocType {
   /** Content: Text Editor */
   content: string
@@ -280,8 +290,6 @@ export interface GPComment extends DocType {
   reference_name?: string
   /** Edited At: Datetime */
   edited_at?: string
-  /** Reactions: Table (GP Reaction) */
-  reactions: GPReaction[]
   /** Deleted At: Datetime */
   deleted_at?: string
   /** Tags: Table (GP Tag Link) */
@@ -306,7 +314,7 @@ export interface GPPollVote extends ChildDocType {
   option?: string
 }
 
-// Last updated: 2023-09-08 00:06:11.732481
+// Last updated: 2026-10-17 12:00:00.000000
 export interface GPPoll extends DocType {
   /** Title: Data */
   title: string
@@ -324,8 +332,8 @@ export interface GPPoll extends DocType {
   total_votes?: number
   /** Stopped At: Datetime */
   stopped_at?: string
-  /** Reactions: Table (GP Reaction) */
-  reactions: GPReaction[]
+  /** Comment: Link (GP Comment) */
+  comment?: string
 }
 
 // Last updated: 2022-12-07 21:34:41.411618
@@ -400,4 +408,40 @@ export interface GPCustomEmoji extends DocType {
   image: string
   /** Keywords: Small Text */
   keywords?: string
+}
+
+// Last updated: 2026-08-02 10:00:00.000000
+export interface GPProfileBentoCard extends ChildDocType {
+  /** Card ID: Data */
+  card_id: string
+  /** Source: Select */
+  source?: 'custom' | 'field'
+  /** Field: Data */
+  field?: string
+  /** Type: Select */
+  type: 'Card' | 'Blank'
+  /** Size: Select */
+  size: '1x1' | '1x2' | '2x1' | '2x2' | '4x1' | '4x2'
+  /** Title: Data */
+  title?: string
+  /** Text: Small Text */
+  text?: string
+  /** URL: Data */
+  url?: string
+  /** Image: Attach Image */
+  image?: string
+  /** Image Rendering: Select */
+  image_rendering?: 'Cover' | 'Natural' | 'Fit'
+  /** Image Position: Int */
+  image_position?: number
+}
+
+// Last updated: 2026-10-14 12:00:00.000000
+export interface GPBookmark extends DocType {
+  /** User: Link (User) */
+  user: string
+  /** Discussion: Link (GP Discussion) */
+  discussion?: string
+  /** Comment: Link (GP Comment) */
+  comment?: string
 }

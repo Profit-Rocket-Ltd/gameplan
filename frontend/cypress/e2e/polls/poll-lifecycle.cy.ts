@@ -23,7 +23,7 @@ describe('Poll lifecycle', () => {
     cy.loginAs('member')
   })
 
-  it('creates a multiple-answer poll, toggles answers, receives a live tally, and stops it', () => {
+  it('creates a multiple-answer poll inside a comment, toggles answers, receives a live tally, and stops it', () => {
     let poll: string
 
     cy.intercept('GET', `/api/v2/document/GP%20Discussion/${discussion}`).as('getDiscussion')
@@ -33,23 +33,30 @@ describe('Poll lifecycle', () => {
     cy.visit(`/g/community/${community}/space/${space}/discussion/${discussion}`)
     cy.wait('@getDiscussion')
 
-    cy.intercept({ method: 'POST', url: '/api/v2/document/GP%20Poll', times: 1 }).as('createPoll')
+    cy.intercept({ method: 'POST', url: '/api/v2/document/GP%20Comment', times: 1 }).as(
+      'createComment',
+    )
     cy.button('Add a comment').click()
-    cy.button('Poll').click()
+    cy.get('[contenteditable=true]').should('be.visible').click().type('Before the poll')
+    cy.iconButton('Poll').click()
 
-    // The question input is only reachable through its <label for>, the way a
-    // screen reader would find it.
     labelledInput('Question').type('Ship on Friday?')
     cy.get('input[placeholder="Option 1"]').type('Yes')
     cy.get('input[placeholder="Option 2"]').type('No')
     labelledCheckbox('Multiple answers').check()
     labelledCheckbox('Anonymous').should('be.disabled')
+    cy.iconButton('Poll').should('be.disabled')
+    cy.get('[contenteditable=true] > p').last().click().type('After the poll')
     cy.button('Submit').click()
-    cy.wait('@createPoll').then(({ response }) => {
-      expect(response?.body.data.title).to.equal('Ship on Friday?')
+    cy.wait('@createComment').then(({ response }) => {
+      expect(response?.body.data.content).to.match(
+        /Before the poll.*data-poll="\d+".*After the poll/s,
+      )
     })
 
     cy.contains('Ship on Friday?').should('be.visible')
+    cy.contains('p', 'Before the poll').should('be.visible')
+    cy.contains('p', 'After the poll').should('be.visible')
     cy.contains('0 answers from 0 people').should('exist')
 
     // Each answer is a real checkbox: it is independently keyboard reachable,
@@ -107,13 +114,80 @@ describe('Poll lifecycle', () => {
     cy.visit(`/g/community/${community}/space/${space}/discussion/${discussion}`)
     cy.contains('Ship on Friday?').should('be.visible')
     pollAnswer('Yes').should('be.enabled')
-    cy.button('Stop Poll').click()
+    cy.selectDropdownOption('Poll Options', 'Stop poll')
     cy.dialog('button:contains("Stop")').click()
     cy.wait('@stopPoll')
 
     cy.contains('Ended').should('exist')
-    cy.contains('button', 'Stop Poll').should('not.exist')
+    // Nothing is left in a stopped multiple-answer poll's menu, so the button is hidden.
+    cy.get('button[aria-label="Poll Options"]').should('not.exist')
     pollAnswer('Yes').should('be.disabled')
+  })
+
+  it('keeps a poll-only comment draft across a reload', () => {
+    cy.intercept('POST', '/api/v2/document/GP%20Draft').as('draftInsert')
+    cy.visit(`/g/community/${community}/space/${space}/discussion/${discussion}`)
+
+    cy.button('Add a comment').click()
+    cy.get('[contenteditable=true]').should('be.visible').click()
+    cy.iconButton('Poll').click()
+    labelledInput('Question').type('Ship on Friday?')
+    cy.get('input[placeholder="Option 1"]').type('Yes')
+    cy.get('input[placeholder="Option 2"]').type('No')
+    cy.wait('@draftInsert').its('request.body.content').should('contain', 'data-type="poll"')
+
+    cy.reload()
+    labelledInput('Question').should('have.value', 'Ship on Friday?')
+    cy.get('input[placeholder="Option 1"]').should('have.value', 'Yes')
+    cy.get('input[placeholder="Option 2"]').should('have.value', 'No')
+  })
+
+  // One answer per voter is a radiogroup, not a row of ticks. The bug this pins was a
+  // checkbox on a poll that only ever accepts one answer: it offered a clear box next to
+  // an empty one, a state the vote cannot hold, and it read as "pick as many as you
+  // like" when a second pick in fact replaces the first.
+  it('votes in a single-answer poll through radios, where a second pick replaces the first', () => {
+    cy.request({
+      method: 'POST',
+      url: '/api/v2/document/GP%20Poll',
+      body: {
+        title: 'Ship on Friday?',
+        discussion,
+        options: [{ title: 'Yes' }, { title: 'No' }],
+      },
+    })
+
+    cy.intercept('POST', '/api/v2/document/GP%20Poll/*/method/submit_vote').as('submitVote')
+    cy.intercept('POST', '/api/v2/document/GP%20Poll/*/method/retract_vote').as('retractVote')
+    cy.visit(`/g/community/${community}/space/${space}/discussion/${discussion}`)
+    cy.contains('Ship on Friday?').should('be.visible')
+
+    // The options are one group, and not one of them is a checkbox.
+    cy.get('[role="radiogroup"]').should('have.length', 1)
+    cy.get('[data-poll-option] input[type="checkbox"]').should('not.exist')
+
+    pollChoice('Yes').click()
+    cy.wait('@submitVote').its('request.body.option').should('equal', 'Yes')
+    pollChoice('Yes').should('have.attr', 'aria-checked', 'true')
+    cy.contains('1 vote').should('exist')
+    assertShare('Yes', '100%')
+
+    // Picking the other option replaces the answer, so the poll still holds one vote and
+    // nothing was retracted to get there.
+    pollChoice('No').click()
+    cy.wait('@submitVote').its('request.body.option').should('equal', 'No')
+    cy.contains('1 vote').should('exist')
+    pollChoice('Yes').should('have.attr', 'aria-checked', 'false')
+    pollChoice('No').should('have.attr', 'aria-checked', 'true')
+    assertShare('Yes', '0%')
+    assertShare('No', '100%')
+
+    // A radio cannot clear itself, so leaving the poll unanswered goes through the menu.
+    cy.selectDropdownOption('Poll Options', 'Retract vote')
+    cy.dialog('button:contains("Retract vote")').click()
+    cy.wait('@retractVote')
+    pollChoice('No').should('have.attr', 'aria-checked', 'false')
+    cy.contains('0 votes').should('exist')
   })
 
   // A poll is a post like any other, so it carries reactions too. Reacting to it used
@@ -212,7 +286,7 @@ describe('Poll lifecycle', () => {
     cy.visit(`/g/community/${community}/space/${space}/discussion/${discussion}`)
     cy.contains('Archived poll').should('be.visible')
     cy.contains('button', 'Stop Poll').should('not.exist')
-    pollAnswer('Yes').should('be.disabled')
+    pollChoice('Yes').should('be.disabled')
 
     cy.iconButton('Poll Options').click()
     cy.get('[role="menuitem"]:visible').contains('Show results').should('be.visible')
@@ -228,10 +302,6 @@ describe('Poll lifecycle', () => {
   })
 })
 
-function labelledInput(label: string) {
-  return cy.contains('label', label).then(($label) => cy.get(`[id="${$label.attr('for')}"]`))
-}
-
 function labelledCheckbox(label: string) {
   return cy
     .get('label')
@@ -240,8 +310,18 @@ function labelledCheckbox(label: string) {
     .then(($label) => cy.get(`input[type="checkbox"][id="${$label.attr('for')}"]`))
 }
 
+/** An answer on a multiple-answer poll, where each option is an independent checkbox. */
+function labelledInput(label: string) {
+  return cy.contains('label', label).then(($label) => cy.get(`[id="${$label.attr('for')}"]`))
+}
+
 function pollAnswer(label: string) {
   return cy.get(`input[type="checkbox"][aria-label="${label}"]`)
+}
+
+/** An answer on a single-answer poll, where the options are one radiogroup. */
+function pollChoice(label: string) {
+  return cy.get(`[role="radio"][aria-label="${label}"]`)
 }
 
 /** The option's whole row: the checkbox, its share of the vote, and the bar behind them. */
@@ -253,12 +333,15 @@ function pollAnswerRow(label: string) {
  * Assert an option's share exactly. A substring match would not do: `contains('0%')`
  * also matches "100%", so the assertion that a retracted option drops to 0% could not
  * fail for the bug it exists to catch.
+ *
+ * The check goes in `should` so it re-runs. A vote lands in the aria state before the
+ * shares are redrawn, so a share read once, straight after the radio has flipped, is
+ * still the share the option had under the previous answer.
  */
 function assertShare(label: string, share: string) {
   pollAnswerRow(label)
     .contains('span', /^\s*\d+%\s*$/)
-    .invoke('text')
-    .then((text) => expect(text.trim()).to.equal(share))
+    .should(($share) => expect($share.text().trim()).to.equal(share))
 }
 
 function deliverSocketEvent(event: string, payload: unknown) {

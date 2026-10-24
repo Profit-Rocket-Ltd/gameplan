@@ -1,10 +1,10 @@
 <template>
   <div>
     <PageHeaderMobile class="sm:hidden" title="Tasks">
-      <template #left>
-        <PageHeaderBackButton :to="{ name: 'More' }" />
+      <template #prefix>
+        <PageHeaderBackButton :fallback-route="{ name: 'More' }" />
       </template>
-      <template #right>
+      <template #suffix>
         <Button
           variant="ghost"
           size="md"
@@ -22,7 +22,7 @@
     <div class="body-container">
       <div class="flex pt-3 sm:pt-5">
         <TabButtons
-          :buttons="[
+          :options="[
             { label: 'All', value: 'all' },
             { label: 'Assigned to me', value: 'assigned' },
             { label: 'Created by me', value: 'owner' },
@@ -32,6 +32,7 @@
       </div>
       <div class="pb-6 mt-3 sm:mt-4">
         <TaskList
+          :key="currentTab"
           :listOptions="{ filters, pageLength: 999999 }"
           :groupByStatus="true"
           ref="taskList"

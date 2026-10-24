@@ -1,13 +1,26 @@
 import { dayjsLocal, toast } from 'frappe-ui'
 
-export function getImgDimensions(
-  imgSrc: string,
-): Promise<{ width: number; height: number; ratio: number }> {
+export interface ImgDimensions {
+  width: number
+  height: number
+  ratio: number
+}
+
+/**
+ * Natural size of an image, or `null` when it cannot be loaded.
+ *
+ * Resolving on error matters: without it a broken or missing URL leaves the
+ * promise pending forever and every caller awaiting it stays suspended.
+ */
+export function getImgDimensions(imgSrc: string): Promise<ImgDimensions | null> {
   return new Promise((resolve) => {
     let img = new Image()
     img.onload = function () {
       let { width, height } = img
-      resolve({ width, height, ratio: width / height })
+      resolve(height ? { width, height, ratio: width / height } : null)
+    }
+    img.onerror = function () {
+      resolve(null)
     }
     img.src = imgSrc
   })
@@ -61,4 +74,48 @@ export function relativeTimestamp(timestamp: string): string {
     return dayjsLocal(timestamp).format('D MMM')
   }
   return dayjsLocal(timestamp).format('D MMM YYYY')
+}
+
+/**
+ * Whether an editor body carries nothing a reader would see.
+ *
+ * TipTap serializes an untouched document as `<p></p>`, so a plain emptiness check on the
+ * HTML string is not enough. Media-only bodies (an image, a video, an attachment) have no
+ * text but are meaningful, so the check is deliberately structural: strip tags that render
+ * nothing on their own and see whether any markup or text survives.
+ */
+export function isEditorContentEmpty(content: string | null | undefined): boolean {
+  const html = (content ?? '').trim()
+  if (!html) return true
+  if (/<div\b[^>]*\bdata-type="poll"/i.test(html)) return false
+  const stripped = html
+    .replace(/<(p|div|br|span)\b[^>]*>/gi, '')
+    .replace(/<\/(p|div|span)>/gi, '')
+    .replace(/&nbsp;/gi, ' ')
+    .trim()
+  return stripped.length === 0
+}
+
+/**
+ * Pull the human-readable text out of a frappe-ui request error.
+ *
+ * `frappeRequest`/`call` put the clean `frappe.throw()` text on the error's
+ * `messages` array (parsed out of `_server_messages`) and leave the noisy
+ * "<method> <ExcType>" string on `message`, so prefer `messages`.
+ */
+export function extractServerMessage(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error === 'string' ? error : ''
+
+  let serverMessages = (error as Error & { messages?: unknown }).messages
+  if (Array.isArray(serverMessages)) {
+    let messages = serverMessages.filter(
+      (message): message is string => typeof message === 'string',
+    )
+    if (messages.length) return stripHtml(messages.join('\n'))
+  }
+  return error.message ? stripHtml(error.message) : ''
+}
+
+function stripHtml(value: string) {
+  return value.replace(/<[^>]*>/g, '').trim()
 }

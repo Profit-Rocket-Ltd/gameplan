@@ -11,18 +11,34 @@ from frappe.query_builder.functions import Count
 from frappe.website.utils import cleanup_page_name
 
 import gameplan
-from gameplan.api import get_user_info, require_admin
 from gameplan.extends.client import check_permissions
 from gameplan.mixins.attachments import HasAttachments
+from gameplan.realtime import notify_users_changed
+from gameplan.utils.document import with_stored_document
 
 PROFILE_BENTO_CARD_TYPES = {"Card", "Blank"}
+PROFILE_BENTO_CARD_SOURCES = {"custom", "field"}
 PROFILE_BENTO_CARD_SIZES = {"1x1", "1x2", "2x1", "2x2", "4x1", "4x2"}
 PROFILE_BENTO_IMAGE_RENDERING = {"Cover", "Natural", "Fit"}
 PROFILE_BENTO_CARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 PROFILE_BENTO_URL_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x20\x7f]")
 PROFILE_BENTO_ALLOWED_URL_SCHEMES = {"http", "https"}
 PROFILE_BENTO_MAX_CARDS = 40
+PROFILE_BENTO_DEFAULT_IMAGE_POSITION = 50
+PROFILE_BENTO_HTML_TAG_PATTERN = re.compile(r"<[^>]*>")
+PROFILE_BENTO_HTML_MEDIA_PATTERN = re.compile(r"<\s*(img|video|audio|iframe|embed)\b", re.IGNORECASE)
 QUICK_REACTION_MAX_SLOTS = 20
+
+# Profile fields a bento card may bind to. The order is the default layout order:
+# row 1 is the cover (4 columns), row 2 is avatar + name + bio (1 + 1 + 2), and
+# About fills rows 3-4.
+PROFILE_BENTO_BOUND_FIELDS = {
+	"cover_image": {"id": "cover", "size": "4x1", "title": "Cover image", "kind": "image"},
+	"image": {"id": "avatar", "size": "1x1", "title": "Avatar", "kind": "image"},
+	"full_name": {"id": "full-name", "size": "1x1", "title": "Full name", "kind": "text"},
+	"bio": {"id": "bio", "size": "2x1", "title": "Bio", "kind": "text"},
+	"readme": {"id": "about", "size": "4x2", "title": "About", "kind": "html"},
+}
 
 
 class GPUserProfile(HasAttachments, Document):
@@ -30,55 +46,158 @@ class GPUserProfile(HasAttachments, Document):
 
 	def validate(self):
 		self.quick_reaction_emojis = normalize_quick_reaction_emojis(self.quick_reaction_emojis)
+		self.drop_foreign_card_images()
+		self.validate_profile_ownership()
+
+	def validate_profile_ownership(self):
+		"""Only the profile's own user may change it, admins included.
+
+		Runs even when permission checks are bypassed. Changes the system makes on a
+		user's behalf, such as syncing the name and enabled state from User, set
+		`ignore_profile_ownership`.
+		"""
+		if (
+			self.is_new()
+			or self.flags.ignore_profile_ownership
+			or frappe.flags.in_install
+			or frappe.flags.in_migrate
+			or frappe.flags.in_fixtures
+		):
+			return
+		user = frappe.session.user
+		if user != "Administrator" and self.user != user:
+			frappe.throw("Cannot modify another user's profile", frappe.PermissionError)
 
 	def autoname(self):
 		self.name = self.generate_name()
 
 	def on_update(self):
 		self.attach_files_in_content()
+		self.attach_bento_card_images()
+
+	def attach_bento_card_images(self, allow_session_owner=True):
+		"""Attach the images on this profile's bento cards to the profile.
+
+		`GP Profile Bento Card` is a child table, and Frappe only auto-attaches Attach
+		fields declared on the parent doctype, so a card image is never attached to
+		anything. An unattached private File falls through `File.has_permission` to
+		deny, which would leave the card visible to its uploader and 403 for everyone
+		else. Attached to the profile, it inherits the profile's read permission,
+		which every signed-in user has.
+		"""
+		# The profile's own user is the only person who uploads their card images;
+		# `self.owner` is whoever created the User row, which is usually an admin.
+		allowed_owners = {self.user}
+		if allow_session_owner:
+			allowed_owners.add(frappe.session.user)
+
+		self.attach_files_at_urls((row.image for row in self.get("bento_cards")), allowed_owners)
 
 	def generate_name(self):
 		full_name = frappe.db.get_value("User", self.user, "full_name")
 		return append_number_if_name_exists(self.doctype, cleanup_page_name(full_name))
 
 	@frappe.whitelist(methods=["POST"])
+	@with_stored_document
 	def set_image(self, image):
+		self.check_image_is_ours(image)
 		self.image = image
 		self.is_image_background_removed = False
 		self.image_background_color = None
 		self.original_image = None
 		self.save()
-		gameplan.refetch_resource("Users")
+		notify_users_changed()
+
+	def foreign_private_images(self, images):
+		"""Which of `images` name a private file this profile has no claim on.
+
+		Same rule as `HasAttachments._maybe_attach_file`: the file has to have been
+		uploaded by the profile's own user, or by whoever is saving (the Administrator
+		account, or a system change made with `ignore_profile_ownership`). Only private
+		files are checked, because a public file is readable by everyone already and
+		naming one exposes nothing. One query for the whole layout, so a profile with
+		many cards still costs a single round trip.
+		"""
+		urls = {image for image in images if image}
+		if not urls:
+			return set()
+
+		rows = frappe.qb.get_query(
+			"File",
+			filters={"file_url": ("in", list(urls)), "is_private": 1},
+			fields=["file_url", "owner"],
+		).run(as_dict=True)
+
+		allowed_owners = {self.user, frappe.session.user}
+		return {row.file_url for row in rows if row.owner not in allowed_owners}
+
+	def check_image_is_ours(self, image):
+		"""Refuse an avatar URL naming a private file this profile has no claim on.
+
+		The URL comes straight from the client and nothing downstream re-checks it, so
+		without this a user can point their avatar at any `/private/files/...` path they
+		can guess or read off another page.
+		"""
+		if image and self.foreign_private_images([image]):
+			frappe.throw("You can only use an image you uploaded", frappe.PermissionError)
+
+	def check_card_images_are_ours(self):
+		"""Refuse a bento layout naming a private file this profile has no claim on.
+
+		The companion to `drop_foreign_card_images`, for the one path a person actually
+		uses. Saving the layout reports the theft instead of returning a card whose
+		image quietly vanished.
+		"""
+		if self.foreign_private_images(row.image for row in self.get("bento_cards")):
+			frappe.throw("You can only use an image you uploaded", frappe.PermissionError)
+
+	def drop_foreign_card_images(self):
+		"""Clear card images naming a private file this profile has no claim on.
+
+		Dropped rather than refused, so that a row written before this check existed
+		cannot make a profile unsaveable forever.
+
+		The value has to go, not merely stay unattached. `attach_bento_card_images`
+		already declines to attach someone else's file, but frappe's own
+		`attach_files_to_document` now walks child-table Attach fields and claims any
+		orphan File matching the URL, with no owner check (caused by frappe/frappe#42163,
+		tracked in frappe/frappe#42535). It runs on the same `on_update`, after ours,
+		so a value left in the row is attached by the framework anyway, handing that
+		file's read permission to everyone who can read this profile.
+		"""
+		cards = [row for row in self.get("bento_cards") if row.get("image")]
+		if not cards:
+			return
+
+		foreign = self.foreign_private_images(row.image for row in cards)
+		for row in cards:
+			if row.image in foreign:
+				row.image = None
 
 	@frappe.whitelist(methods=["POST"])
-	def change_user_role(self, role):
-		require_admin()
+	@with_stored_document
+	def set_cover_image_position(self, position):
+		"""Reposition the cover from the profile page.
 
-		if role not in ["Gameplan Guest", "Gameplan Member", "Gameplan Admin"]:
-			return get_user_info(self.user)[0]
+		`cover_image_position` is what every read path reports for a bound cover (see
+		`bound_bento_image_position`), so this is the only write that matters. The bound
+		row is mirrored anyway so a stored row never holds a misleading value. Doing it
+		here rather than re-posting the whole layout also avoids dropping the rows of
+		bound fields that are currently empty, because the read path omits them.
+		"""
+		check_profile_bento_save_permission(self)
 
-		user_doc = frappe.get_doc("User", self.user)
-		for _role in list(user_doc.roles):
-			if _role.role in ["Gameplan Guest", "Gameplan Member", "Gameplan Admin"]:
-				user_doc.remove(_role)
-		user_doc.append_roles(role)
-		# Admin-gated by require_admin() above; bypass User's own permission checks so an
-		# admin can change another user's roles.
-		user_doc.save(ignore_permissions=True)
+		position = optional_int_range(position, 0, 100, "Image position")
+		if position is None:
+			frappe.throw("Image position is required")
 
-		return get_user_info(self.user)[0]
+		self.cover_image_position = position
+		for row in self.get("bento_cards"):
+			if row.get("source") == "field" and row.get("field") == "cover_image":
+				row.image_position = position
+		self.save(ignore_permissions=True)
 
-	@frappe.whitelist(methods=["POST"])
-	def disable_user(self):
-		require_admin()
-
-		user_doc = frappe.get_doc("User", self.user)
-		user_doc.enabled = 0
-		# Admin-gated by require_admin() above; bypass User's own permission checks so an
-		# admin can disable another user.
-		user_doc.save(ignore_permissions=True)
-
-		return self.user
+		return {"cover_image_position": self.cover_image_position}
 
 
 def has_permission(doc, ptype="read", user=None):
@@ -88,20 +207,27 @@ def has_permission(doc, ptype="read", user=None):
 	if ptype in ("read", "select", "print", "email", "export", "share"):
 		return True
 
-	# Administrators and Gameplan Admins can manage any profile.
 	if user == "Administrator":
 		return True
-	if "Gameplan Admin" in frappe.get_roles(user) or "System Manager" in frappe.get_roles(user):
+
+	# Admins create and delete profiles along with the User, but never edit one.
+	if ptype in ("create", "delete") and gameplan.is_admin(user):
 		return True
 
-	# Otherwise a user may only modify their own profile.
-	return doc.user == user
+	if isinstance(doc, str):
+		doc = frappe.get_lazy_doc("GP User Profile", doc)
+
+	# A user may only modify their own profile.
+	return bool(doc and doc.user == user)
 
 
 def create_user_profile(doc, method=None):
 	if not frappe.db.exists("GP User Profile", {"user": doc.name}):
-		frappe.get_doc(doctype="GP User Profile", user=doc.name).insert(ignore_permissions=True)
-		frappe.db.commit()
+		profile = frappe.get_doc(doctype="GP User Profile", user=doc.name)
+		profile.flags.ignore_profile_ownership = True
+		profile.insert(ignore_permissions=True)
+		# get_session_user_profile can create the profile during a GET request, which is not committed.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def delete_user_profile(doc, method=None):
@@ -116,32 +242,43 @@ def on_user_update(doc, method=None):
 		profile = frappe.get_doc("GP User Profile", {"user": doc.name})
 		profile.enabled = doc.enabled
 		profile.full_name = doc.full_name
+		profile.flags.ignore_profile_ownership = True
 		profile.save(ignore_permissions=True)
+		# A rename changes what *other* sessions render, and their cached user list has
+		# no other reason to refetch.
+		notify_users_changed()
 
 
 @frappe.whitelist()
 def get_list(
-	fields=None,
-	filters: dict | None = None,
-	order_by=None,
-	start=0,
-	limit=20,
-	group_by=None,
-	parent=None,
-	debug=False,
+	fields: list | str | None = None,
+	filters: dict | list | str | None = None,
+	order_by: str | None = None,
+	start: int = 0,
+	limit: int = 20,
+	group_by: str | None = None,
+	parent: str | None = None,
+	debug: bool = False,
 ):
+	# Hinted so frappe checks the types at the boundary, and wide enough for how they
+	# arrive: useList sends fields and filters as GET query strings (like get_discussions).
 	doctype = "GP User Profile"
 	check_permissions(doctype, parent)
 	query = frappe.qb.get_query(
 		table=doctype,
-		fields=fields,
-		filters=filters,
+		fields=frappe.parse_json(fields) if fields else None,
+		filters=frappe.parse_json(filters) if filters else None,
 		order_by=order_by,
 		offset=start,
 		limit=limit,
 		group_by=group_by,
+		# Fields and filters come from the client and may follow links (`user.last_ip`):
+		# checked, so they reach no more of another doctype than the user may read.
+		ignore_permissions=False,
 	)
 	data = query.run(as_dict=True, debug=debug)
+	if not data:
+		return data
 	users = [d.user for d in data]
 
 	Discussion = frappe.qb.DocType("GP Discussion")
@@ -176,9 +313,9 @@ def get_list(
 	discussion_reactions = (
 		frappe.qb.from_(Reaction)
 		.join(Discussion)
-		.on(Discussion.name == Reaction.parent)
+		.on(Discussion.name == Reaction.reference_name)
 		.select(Count(Reaction.name).as_("count"), Discussion.owner)
-		.where((Reaction.parenttype == "GP Discussion") & Discussion.owner.isin(users))
+		.where((Reaction.reference_doctype == "GP Discussion") & Discussion.owner.isin(users))
 		.groupby(Discussion.owner)
 	).run(as_dict=True)
 	for r in discussion_reactions:
@@ -187,10 +324,12 @@ def get_list(
 	comment_reactions = (
 		frappe.qb.from_(Reaction)
 		.join(Comment)
-		.on(Comment.name == Reaction.parent)
+		.on(Comment.name == Reaction.reference_name)
 		.select(Count(Reaction.name).as_("count"), Comment.owner)
 		.where(
-			(Reaction.parenttype == "GP Comment") & Comment.owner.isin(users) & Comment.deleted_at.isnull()
+			(Reaction.reference_doctype == "GP Comment")
+			& Comment.owner.isin(users)
+			& Comment.deleted_at.isnull()
 		)
 		.groupby(Comment.owner)
 	).run(as_dict=True)
@@ -210,7 +349,7 @@ def get_list(
 def get_my_bento_cards():
 	profile = get_session_user_profile()
 	profile.check_permission("read")
-	return get_profile_bento_response(profile, include_starter_cards=True)
+	return get_profile_bento_response(profile)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -218,6 +357,26 @@ def save_my_bento_cards(cards: list | str):
 	profile = get_session_user_profile()
 	check_profile_bento_save_permission(profile)
 	profile.set("bento_cards", normalize_bento_cards(cards))
+	profile.check_card_images_are_ours()
+	# Set unconditionally, so saving an empty layout ("nothing on my profile") sticks
+	# instead of falling back to the computed default on the next read.
+	profile.layout_customized = 1
+	profile.save(ignore_permissions=True)
+	return get_profile_bento_response(profile)
+
+
+@frappe.whitelist(methods=["POST"])
+def reset_my_bento_cards():
+	"""Drop the saved layout so the profile follows the computed default again.
+
+	The inverse of `save_my_bento_cards`, and it has to clear both halves: the rows
+	are what a read returns, and `layout_customized` is what makes it prefer them.
+	Bound values are untouched — they live on the profile, never on the layout.
+	"""
+	profile = get_session_user_profile()
+	check_profile_bento_save_permission(profile)
+	profile.set("bento_cards", [])
+	profile.layout_customized = 0
 	profile.save(ignore_permissions=True)
 	return get_profile_bento_response(profile)
 
@@ -240,22 +399,18 @@ def get_session_user_profile():
 
 
 def get_profile_bento_cards(profile):
-	return [profile_bento_row_to_card(row) for row in profile.get("bento_cards")]
+	cards = (profile_bento_row_to_card(row, profile) for row in profile.get("bento_cards"))
+	# Bound cards resolve to None when the profile field they point at is empty.
+	return [card for card in cards if card is not None]
 
 
-def get_profile_bento_response(profile, include_starter_cards=False):
-	response = {
+def get_profile_bento_response(profile):
+	is_default = not profile.layout_customized
+	return {
 		"profile": profile.name,
-		"cards": get_profile_bento_cards(profile),
-		"is_default": not has_saved_bento_cards(profile),
+		"cards": get_profile_bento_default_cards(profile) if is_default else get_profile_bento_cards(profile),
+		"is_default": is_default,
 	}
-	if include_starter_cards and response["is_default"]:
-		response["starter_cards"] = get_profile_bento_starter_cards(profile)
-	return response
-
-
-def has_saved_bento_cards(profile):
-	return bool(profile.get("bento_cards"))
 
 
 def check_profile_bento_save_permission(profile):
@@ -277,10 +432,11 @@ def normalize_bento_cards(cards):
 		frappe.throw(f"Profiles can have at most {PROFILE_BENTO_MAX_CARDS} bento cards")
 
 	seen_card_ids = set()
-	return [normalize_bento_card(card, seen_card_ids) for card in cards]
+	seen_bound_fields = set()
+	return [normalize_bento_card(card, seen_card_ids, seen_bound_fields) for card in cards]
 
 
-def normalize_bento_card(card, seen_card_ids):
+def normalize_bento_card(card, seen_card_ids, seen_bound_fields):
 	if not isinstance(card, dict):
 		frappe.throw("Each bento card must be an object")
 
@@ -293,18 +449,23 @@ def normalize_bento_card(card, seen_card_ids):
 
 	card_type = require_allowed_value(card.get("type"), PROFILE_BENTO_CARD_TYPES, "Card type")
 	size = require_allowed_value(card.get("size"), PROFILE_BENTO_CARD_SIZES, "Card size")
+	source = normalize_bento_card_source(card.get("source"))
+	field = normalize_bento_card_field(card, source, card_type, seen_bound_fields)
 	image_rendering = optional_allowed_value(
 		card.get("imageRendering") or card.get("image_rendering") or "Cover",
 		PROFILE_BENTO_IMAGE_RENDERING,
 		"Image rendering",
 	)
-	text = normalize_bento_card_text(card.get("text"), card_type)
-	image = normalize_bento_card_image(card.get("image"), card_type)
-	if card_type == "Card" and not text and not image:
+	# A bound card never stores its value; it is resolved from the profile on every read.
+	text = None if source == "field" else normalize_bento_card_text(card.get("text"), card_type)
+	image = None if source == "field" else normalize_bento_card_image(card.get("image"), card_type)
+	if source == "custom" and card_type == "Card" and not text and not image:
 		frappe.throw("Cards must have text or an image")
 
 	return {
 		"card_id": card_id,
+		"source": source,
+		"field": field,
 		"type": card_type,
 		"size": size,
 		"title": truncate(card.get("title"), 140),
@@ -321,13 +482,49 @@ def normalize_bento_card(card, seen_card_ids):
 	}
 
 
-def profile_bento_row_to_card(row):
+def normalize_bento_card_source(value):
+	return optional_allowed_value(value, PROFILE_BENTO_CARD_SOURCES, "Card source") or "custom"
+
+
+def normalize_bento_card_field(card, source, card_type, seen_bound_fields):
+	field = (card.get("field") or "").strip() or None
+	if source != "field":
+		return None
+
+	if card_type != "Card":
+		frappe.throw("Only cards of type Card can be bound to a profile field")
+	if not field:
+		frappe.throw("Bound cards must name a profile field")
+	if field not in PROFILE_BENTO_BOUND_FIELDS:
+		frappe.throw(f"Invalid bound field: {field}")
+	if field in seen_bound_fields:
+		frappe.throw(f"Duplicate bound field: {field}")
+	seen_bound_fields.add(field)
+	return field
+
+
+def profile_bento_row_to_card(row, profile):
+	"""Build the API shape for one stored row, or None when a bound field is empty."""
+	source = row.get("source") or "custom"
+	if source == "field":
+		return build_bound_bento_card(
+			profile,
+			row.get("field"),
+			card_id=row.card_id,
+			size=row.size,
+			title=row.title,
+			image_rendering=row.image_rendering or "Cover",
+			image_position=row.image_position,
+			url=row.url,
+		)
+
 	card = {
 		"id": row.card_id,
 		"type": row.type,
 		"size": row.size,
 		"title": row.title,
 		"imageRendering": row.image_rendering or "Cover",
+		"source": "custom",
 	}
 	if row.text:
 		card["text"] = row.text
@@ -341,59 +538,102 @@ def profile_bento_row_to_card(row):
 	return card
 
 
-def get_profile_bento_starter_cards(profile):
-	display_name = profile.full_name or frappe.db.get_value("User", profile.user, "full_name") or profile.user
-	cards = get_default_profile_image_cards(profile)
-	cards.extend(
-		[
-			{
-				"id": "full-name",
-				"type": "Card",
-				"size": "1x1",
-				"title": "Full name",
-				"text": display_name,
-			},
-			{
-				"id": "bio",
-				"type": "Card",
-				"size": "2x1",
-				"title": "Bio",
-				"text": profile.bio or "No bio yet.",
-			},
-		]
-	)
-	return cards
+def build_bound_bento_card(
+	profile,
+	field,
+	card_id,
+	size,
+	title,
+	image_rendering="Cover",
+	image_position=None,
+	url=None,
+):
+	spec = PROFILE_BENTO_BOUND_FIELDS.get(field)
+	if not spec:
+		return None
+
+	value = resolve_profile_bound_value(profile, field)
+	if value is None:
+		return None
+
+	kind = spec["kind"]
+	image_position = bound_bento_image_position(profile, field, image_position)
+	card = {
+		"id": card_id,
+		"type": "Card",
+		"size": size,
+		"title": title,
+		"imageRendering": image_rendering,
+		"source": "field",
+		"field": field,
+		"format": kind,
+	}
+	card["image" if kind == "image" else "text"] = value
+	if url:
+		card["url"] = url
+	if image_position is not None:
+		card["imagePosition"] = image_position
+
+	return card
 
 
-def get_default_profile_image_cards(profile):
+def resolve_profile_bound_value(profile, field):
+	"""Current value of a bound profile field, or None when it counts as empty."""
+	if field == "full_name":
+		full_name = profile.full_name or frappe.db.get_value("User", profile.user, "full_name")
+		return full_name or profile.user or None
+
+	value = profile.get(field)
+	if field == "readme":
+		return value if html_has_content(value) else None
+	if isinstance(value, str):
+		value = value.strip()
+	return value or None
+
+
+def html_has_content(value):
+	"""True when HTML carries visible content. An empty TipTap doc is `<p></p>`."""
+	if not value:
+		return False
+	if PROFILE_BENTO_HTML_MEDIA_PATTERN.search(value):
+		return True
+	text = PROFILE_BENTO_HTML_TAG_PATTERN.sub("", value).replace("&nbsp;", " ")
+	return bool(text.strip())
+
+
+def get_profile_bento_default_cards(profile):
+	"""The computed default layout: one bound card per non-empty profile field."""
 	cards = []
-	if profile.cover_image:
-		cards.append(
-			{
-				"id": "cover",
-				"type": "Card",
-				"size": "4x1",
-				"title": "Cover image",
-				"image": profile.cover_image,
-				"imageRendering": "Cover",
-				"imagePosition": profile.cover_image_position
-				if profile.cover_image_position is not None
-				else 50,
-			}
+	for field, spec in PROFILE_BENTO_BOUND_FIELDS.items():
+		card = build_bound_bento_card(
+			profile,
+			field,
+			card_id=spec["id"],
+			size=spec["size"],
+			title=spec["title"],
+			image_position=PROFILE_BENTO_DEFAULT_IMAGE_POSITION,
 		)
-	if profile.image:
-		cards.append(
-			{
-				"id": "avatar",
-				"type": "Card",
-				"size": "1x1",
-				"title": "Avatar",
-				"image": profile.image,
-				"imageRendering": "Cover",
-				"imagePosition": 50,
-			}
-		)
+		if card is not None:
+			cards.append(card)
 	return cards
+
+
+def bound_bento_image_position(profile, field, stored_position=None):
+	"""Where a bound card's image sits.
+
+	For a bound cover the profile is the single source of truth: the position belongs
+	to the image, not to the layout, so `profile.cover_image_position` wins over
+	whatever a stored row carries. That makes the computed default and a saved layout
+	agree by construction — a stale `imagePosition` posted back with the layout can no
+	longer revert a reposition. Every other bound field keeps the layout's value.
+	"""
+	if field != "cover_image":
+		return stored_position
+	if profile.cover_image_position is None:
+		return PROFILE_BENTO_DEFAULT_IMAGE_POSITION
+	# cover_image_position is a Float on the profile, image_position an Int on the card.
+	# Clamp to the same range the save path uses.
+	return min(100, max(0, int(profile.cover_image_position)))
 
 
 def require_card_value(value, label):

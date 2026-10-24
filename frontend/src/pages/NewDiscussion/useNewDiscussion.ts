@@ -1,21 +1,34 @@
 import { ref, computed, onMounted, provide, inject, watch, type InjectionKey } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
-import { call, useDoctype, dialog } from 'frappe-ui'
+import { call, useDoctype, dialog, dayjs, dayjsLocal, getConfig, toast } from 'frappe-ui'
+import { useOwnedRouteWrites } from '@/composables/useOwnedRouteWrites'
 import { useDraftSync, type DraftPayload } from '@/data/useDraftSync'
+import { drafts } from '@/data/drafts'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
-import { getSpace } from '@/data/spaces'
+import { canPostInSpace, getSpace } from '@/data/spaces'
 import { useSessionUser, useUser } from '@/data/users'
 import { tags } from '@/data/tags'
+import { extractServerMessage, isEditorContentEmpty } from '@/utils'
+import { captureError } from '@/utils/errorReporting'
 import type { GPDiscussion } from '@/types/doctypes'
 
 const PUBLISH_DRAFT = 'gameplan.gameplan.doctype.gp_draft.gp_draft.publish_draft'
+const SCHEDULE_DRAFT = 'gameplan.gameplan.doctype.gp_draft.gp_draft.schedule_draft'
+const UNSCHEDULE_DRAFT = 'gameplan.gameplan.doctype.gp_draft.gp_draft.unschedule_draft'
+const SERVER_DATETIME = 'YYYY-MM-DD HH:mm:ss'
+
+function toSiteTime(localDateTime: string) {
+  const systemTimezone = getConfig('systemTimezone')
+  if (!systemTimezone) return dayjs(localDateTime).format(SERVER_DATETIME)
+  const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  return dayjs.tz(localDateTime, localTimezone).tz(systemTimezone).format(SERVER_DATETIME)
+}
 const LOADING_STATUS_DELAY_MS = 200
+const FLUSH_ATTEMPTS = 3
 
 /** Title or non-empty body — the threshold for persisting a draft at all. */
 function hasMeaningfulContent(payload: Partial<DraftPayload>): boolean {
-  const body = (payload.content ?? '').trim()
-  const title = (payload.title ?? '').trim()
-  return title.length > 0 || (body.length > 0 && body !== '<p></p>')
+  return (payload.title ?? '').trim().length > 0 || !isEditorContentEmpty(payload.content)
 }
 
 export function useNewDiscussion() {
@@ -26,7 +39,6 @@ export function useNewDiscussion() {
 
   // The canonical composer route carries the community; the legacy route does not.
   const communityId = computed(() => optionalParam(route.params.communityId))
-  const isScoped = computed(() => Boolean(communityId.value))
 
   const errorMessage = ref<string | null>(null)
   const publishError = ref<string | null>(null)
@@ -55,13 +67,58 @@ export function useNewDiscussion() {
   const draftData = draft.data
   const isPersisted = computed(() => Boolean(draft.serverName.value))
 
-  // Drafts are owner-scoped on the server, so the author is always the current user.
-  const author = computed(() => useUser(sessionUser.name))
+  const scheduledAt = ref<string | null>(null)
+  const scheduling = ref(false)
+  let scheduleVersion = 0
+  watch(
+    () => draft.serverName.value,
+    async (name) => {
+      const version = ++scheduleVersion
+      if (!name) {
+        scheduledAt.value = null
+        return
+      }
+      scheduledAt.value = drafts.data?.find((row) => row.name === name)?.scheduled_at || null
+      try {
+        const row = await call<{ scheduled_at: string | null } | null>('frappe.client.get_value', {
+          doctype: 'GP Draft',
+          filters: { name },
+          fieldname: 'scheduled_at',
+        })
+        if (version === scheduleVersion) scheduledAt.value = row?.scheduled_at || null
+      } catch (error) {
+        captureError(error, { action: 'read-draft-schedule', draft: name })
+      }
+    },
+    { immediate: true },
+  )
+  const scheduledAtLabel = computed(() =>
+    scheduledAt.value ? dayjsLocal(scheduledAt.value).format('ddd D MMM, h:mm A') : '',
+  )
+
+  // A shared `?draft=` link can open someone else's draft. It stays theirs: the composer
+  // shows it read-only, with no Publish or Delete. Null while the owner is unknown, which
+  // is equally read-only, so neither control flashes before the draft resolves.
+  const author = computed(() => (draft.owner.value ? useUser(draft.owner.value) : null))
   const isDraftLoading = draft.isLoading
   const isComposerEditable = computed(
-    () => author.value.name === sessionUser.name && !isDraftLoading.value,
+    () => author.value?.name === sessionUser.name && !isDraftLoading.value,
   )
   const showDraftLoadingStatus = ref(false)
+
+  // Writable view of the draft's space, falling back to the route while the draft resolves.
+  // The picker holds its place in the layout throughout that wait, so it has to show the
+  // space the URL already names rather than flipping from "Select Space" to it on arrival.
+  const selectedSpace = computed({
+    get: () => draftData.value?.project ?? routeQueryString(route.query.spaceId),
+    set: (value: string | null) => {
+      if (draftData.value) draftData.value.project = value
+    },
+  })
+
+  const canPublish = computed(() =>
+    Boolean(draftData.value?.project && draftData.value?.title?.trim()),
+  )
 
   // Keep fast IndexedDB/server restores visually quiet, but expose a real status when a
   // request is slow enough that the temporarily disabled composer needs explanation.
@@ -79,38 +136,61 @@ export function useNewDiscussion() {
     { immediate: true },
   )
 
-  // In scoped mode the picker only offers spaces from the route's community; the
-  // legacy route keeps the full grouped list.
-  const spaceOptions = useGroupedSpaceOptions({
-    filterFn: (space) =>
-      !space.archived_at && (!isScoped.value || space.team === communityId.value),
-  })
+  // `canPostInSpace` is the same predicate the space dialog filters on, so the composer
+  // cannot offer a space the dialog would not: it also rules out read-only mode and guests,
+  // who may comment but never start a discussion anywhere.
+  const spaceOptions = useGroupedSpaceOptions({ filterFn: canPostInSpace })
+
+  // Typing the composer URL is the one way into it without going through the dialog, so
+  // this is where a user with nothing to pick lands. An empty picker says nothing; the
+  // shared empty state says why.
+  const hasSpaceToPostIn = computed(() => spaceOptions.value.length > 0)
 
   const immediateSave = () => draft.flush()
 
+  // The composer stays mounted behind the settings overlay, where the URL is /settings/*
+  // and every composer param reads as empty. A route sync issued then would navigate off
+  // /settings and close the dialog, so the syncs below wait until the composer owns the
+  // URL again. Waiting rather than skipping matters most for the draft name: it is written
+  // to the URL exactly once, and a draft with no ?draft= link is stranded after a reload.
+  const runWhenOwned = useOwnedRouteWrites(
+    () => route.name === 'NewDiscussion' || route.name === 'LegacyNewDiscussion',
+  )
+
   function syncDraftToRoute(name: string) {
-    if (communityId.value) {
-      router.replace({
-        name: 'NewDiscussion',
-        params: { communityId: communityId.value },
-        query: draftRouteQuery(name, draftData.value.project),
-      })
-    } else {
-      router.replace({
-        name: 'LegacyNewDiscussion',
-        query: draftRouteQuery(name, draftData.value.project),
-      })
-    }
+    runWhenOwned(() => {
+      // A deferred sync could land after the composer moved on to a different draft; never
+      // point the URL at a row this composer no longer holds.
+      if (draft.serverName.value !== name) return
+      if (communityId.value) {
+        router.replace({
+          name: 'NewDiscussion',
+          params: { communityId: communityId.value },
+          query: draftRouteQuery(name, draftData.value?.project),
+        })
+      } else {
+        router.replace({
+          name: 'LegacyNewDiscussion',
+          query: draftRouteQuery(name, draftData.value?.project),
+        })
+      }
+    })
   }
 
-  // A draft opened on the legacy route that already belongs to a space is moved onto the
-  // canonical scoped route. Drafts with no resolvable community stay on the legacy route.
+  // Keep the URL in step with the draft's space. Only ever called through runWhenOwned,
+  // which is what makes it safe for these to rewrite the route unconditionally.
+  function syncRouteToDraft() {
+    if (!normalizeDraftRoute()) syncSelectedSpaceToRoute(draftData.value?.project)
+  }
+
+  // A draft whose space belongs to another community than the route's — opened on the
+  // legacy route, or moved to a space elsewhere — is moved onto that community's route.
+  // Drafts with no resolvable community stay where they are.
   function normalizeDraftRoute() {
-    if (isScoped.value) return false
-    const project = draftData.value.project
+    const project = draftData.value?.project
     if (!project) return false
     const targetCommunityId = getSpace(project)?.team
-    if (!targetCommunityId) return false
+    if (!targetCommunityId || targetCommunityId === communityId.value) return false
     router.replace({
       name: 'NewDiscussion',
       params: { communityId: targetCommunityId },
@@ -134,6 +214,9 @@ export function useNewDiscussion() {
   // Validation
   const validateDraft = (checkProject = true): boolean => {
     if (!hasInteracted.value) return true // Don't validate until user has interacted
+    // Nothing has been typed yet if the draft is still resolving, so there is nothing to
+    // complain about.
+    if (!draftData.value) return true
 
     errorMessage.value = null
     if (!draftData.value.title) {
@@ -150,6 +233,7 @@ export function useNewDiscussion() {
   // Event handlers
   const handleTitleInput = (e: Event) => {
     const target = e.target as HTMLTextAreaElement
+    if (!draftData.value) return
     draftData.value.title = target.value
     // Height autosizing is handled by useTextareaAutosize in DiscussionBody.vue.
     hasInteracted.value = true
@@ -165,6 +249,21 @@ export function useNewDiscussion() {
     immediateSave()
   }
 
+  // publish_draft builds the discussion from the SERVER row, so a draft that is still dirty
+  // after a flush would be published minus whatever failed to push — most often as an empty
+  // body. A push only covers the snapshot it was built from, so an edit that lands while it
+  // is in flight (a keystroke, an image upload finishing) leaves the draft dirty even though
+  // nothing failed: flush again for those instead of telling the author to check a
+  // connection that is fine. A push that actually threw stops us on the first attempt.
+  async function flushUntilPushed(): Promise<boolean> {
+    for (let attempt = 0; attempt < FLUSH_ATTEMPTS; attempt++) {
+      await draft.flush()
+      if (!draft.serverName.value || !draft.dirty.value) return true
+      if (draft.lastError.value) return false
+    }
+    return false
+  }
+
   // Publish: flush the latest content, then turn the draft into a discussion. The draft
   // row is deleted server-side by publish, so we only forget the local copy afterwards.
   async function publish() {
@@ -174,9 +273,19 @@ export function useNewDiscussion() {
 
     publishing.value = true
     try {
-      await draft.flush()
+      if (!(await flushUntilPushed())) {
+        captureError(draft.lastError.value ?? new Error('Draft still unsynced after flush'), {
+          action: 'publish-discussion-unsynced-draft',
+          draft: draft.serverName.value,
+        })
+        publishError.value =
+          'Could not save your draft to the server. Check your connection and try again.'
+        publishing.value = false
+        return
+      }
 
       let discussionId: string | undefined
+      const draftRowName = draft.serverName.value
       if (draft.serverName.value) {
         isPublishingSuccessfully.value = true
         discussionId = await call(PUBLISH_DRAFT, { name: draft.serverName.value })
@@ -184,34 +293,94 @@ export function useNewDiscussion() {
         // No server row (e.g. the flush failed) — publish directly so nothing is lost.
         isPublishingSuccessfully.value = true
         const doc = await discussions.insert.submit({
-          title: draftData.value.title,
-          content: draftData.value.content,
-          project: draftData.value.project || undefined,
+          title: draftData.value?.title,
+          content: draftData.value?.content,
+          project: draftData.value?.project || undefined,
         })
         discussionId = doc?.name
       }
 
-      await draft.forget()
-
-      if (discussionId) {
-        const spaceId = draftData.value.project
-        const targetCommunityId = communityId.value || (spaceId ? getSpace(spaceId)?.team : null)
-        await router.replace({
-          name: 'Discussion',
-          params: { communityId: targetCommunityId, spaceId, postId: discussionId },
+      // Nothing to navigate to. Say so and keep the draft: leaving `publishing` on would
+      // spin the button forever, and forgetting the draft would drop the only copy left.
+      if (!discussionId) {
+        captureError(new Error('Publishing returned no discussion'), {
+          action: 'publish-discussion-no-id',
+          draft: draft.serverName.value,
         })
-        tags.reload()
+        publishError.value = 'Could not publish this post.'
+        publishing.value = false
+        return
       }
+
+      await draft.forget()
+      // publish_draft deletes the row server-side, so the doctype APIs never saw it go —
+      // drop it from the drafts list here.
+      if (draftRowName) drafts.removeRow(draftRowName)
+
+      const spaceId = draftData.value?.project
+      const targetCommunityId = communityId.value || (spaceId ? getSpace(spaceId)?.team : null)
+      await router.replace({
+        name: 'Discussion',
+        params: { communityId: targetCommunityId, spaceId, postId: discussionId },
+      })
+      tags.reload()
     } catch (error: any) {
-      publishError.value = error?.message || String(error)
+      captureError(error, { action: 'publish-discussion', draft: draft.serverName.value })
+      publishError.value = extractServerMessage(error) || 'Could not publish this post.'
       publishing.value = false
     } finally {
       isPublishingSuccessfully.value = false
     }
   }
 
+  async function scheduleDraft(localDateTime: string) {
+    hasInteracted.value = true
+    publishError.value = null
+    if (!validateDraft(true)) return false
+    scheduling.value = true
+    try {
+      if (!(await flushUntilPushed()) || !draft.serverName.value) {
+        publishError.value =
+          'Could not save your draft to the server. Check your connection and try again.'
+        return false
+      }
+      const name = draft.serverName.value
+      const serverTime = toSiteTime(localDateTime)
+      await call(SCHEDULE_DRAFT, { name, scheduled_at: serverTime })
+      scheduleVersion++
+      scheduledAt.value = serverTime
+      toast.success(`Scheduled for ${scheduledAtLabel.value}`)
+      drafts.reload()
+      await router.replace({ name: 'Drafts' })
+      return true
+    } catch (error: any) {
+      captureError(error, { action: 'schedule-discussion', draft: draft.serverName.value })
+      publishError.value = extractServerMessage(error) || 'Could not schedule this post.'
+      return false
+    } finally {
+      scheduling.value = false
+    }
+  }
+
+  async function unscheduleDraft() {
+    if (!draft.serverName.value) return
+    scheduling.value = true
+    try {
+      await call(UNSCHEDULE_DRAFT, { name: draft.serverName.value })
+      scheduleVersion++
+      scheduledAt.value = null
+      toast.success('Schedule removed. Your draft is still in Drafts.')
+      drafts.reload()
+    } catch (error: any) {
+      captureError(error, { action: 'unschedule-discussion', draft: draft.serverName.value })
+      publishError.value = extractServerMessage(error) || 'Could not remove the schedule.'
+    } finally {
+      scheduling.value = false
+    }
+  }
+
   async function deleteDraft() {
-    if (!hasMeaningfulContent(draftData.value)) {
+    if (!draftData.value || !hasMeaningfulContent(draftData.value)) {
       isDeletingDraft.value = true
       await draft.clear()
       leaveDraft()
@@ -236,21 +405,15 @@ export function useNewDiscussion() {
 
   function initialize() {
     onMounted(() => {
-      // Move legacy-route drafts onto the canonical scoped route once their space is known.
+      // Once when the draft opens, and again whenever its space changes: both move a
+      // legacy-route draft onto the canonical scoped route once its space is known.
       watch(
-        () => draft.ready.value,
-        (ready) => {
-          if (!ready) return
-          if (!normalizeDraftRoute()) syncSelectedSpaceToRoute(draftData.value.project)
+        () => [draftData.value, draftData.value?.project],
+        () => {
+          if (!draftData.value) return
+          runWhenOwned(syncRouteToDraft)
         },
         { immediate: true },
-      )
-      watch(
-        () => draftData.value.project,
-        (spaceId) => {
-          if (!draft.ready.value) return
-          if (!normalizeDraftRoute()) syncSelectedSpaceToRoute(spaceId)
-        },
       )
     })
 
@@ -262,7 +425,7 @@ export function useNewDiscussion() {
         try {
           await draft.flush()
         } catch (error) {
-          console.error('Failed to save draft before leaving:', error)
+          captureError(error, { action: 'draft-flush-on-leave', draft: draft.serverName.value })
         }
       }
       return true
@@ -272,12 +435,15 @@ export function useNewDiscussion() {
   return {
     // Data
     draftData,
+    selectedSpace,
+    canPublish,
     isPersisted,
     publishError,
     errorMessage,
     sessionUser,
     author,
     spaceOptions,
+    hasSpaceToPostIn,
 
     // State
     isDraftLoading,
@@ -286,9 +452,14 @@ export function useNewDiscussion() {
     publishing,
     isPublishingSuccessfully,
     isDeletingDraft,
+    scheduledAt,
+    scheduledAtLabel,
+    scheduling,
 
     // Actions
     publish,
+    scheduleDraft,
+    unscheduleDraft,
     deleteDraft,
     handleTitleInput,
     handleTitleBlur,

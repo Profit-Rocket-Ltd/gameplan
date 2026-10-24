@@ -1,10 +1,10 @@
 <template>
   <div>
     <PageHeaderMobile class="sm:hidden" title="Pages">
-      <template #left>
-        <PageHeaderBackButton :to="{ name: 'More' }" />
+      <template #prefix>
+        <PageHeaderBackButton :fallback-route="{ name: 'More' }" />
       </template>
-      <template #right>
+      <template #suffix>
         <Select :options="sortOptions" v-model="orderBy" />
       </template>
     </PageHeaderMobile>
@@ -54,11 +54,14 @@ const newPage = useNewDoc<GPPage>('GP Page', {
 })
 
 function createNewPage() {
-  newPage.submit().then((doc) => {
-    router.push({
-      name: 'Page',
-      params: { pageId: doc.name, slug: doc.slug },
+  newPage
+    .submit()
+    .then((doc) => {
+      router.push({
+        name: 'Page',
+        params: { pageId: doc.name, slug: doc.slug },
+      })
     })
-  })
+    .catch(() => {})
 }
 </script>

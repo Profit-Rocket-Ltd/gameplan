@@ -1,8 +1,8 @@
 <template>
   <div>
     <PageHeaderMobile class="sm:hidden" :title="taskTitle">
-      <template #left>
-        <PageHeaderBackButton :to="backRoute" :label="isSpaceTask ? 'Tasks' : 'My Tasks'" />
+      <template #prefix>
+        <PageHeaderBackButton :fallback-route="backRoute" />
       </template>
     </PageHeaderMobile>
     <PageHeader class="hidden sm:flex">
@@ -42,7 +42,9 @@
       />
     </PageHeader>
     <div>
+      <!-- Keyed so opening another task mounts a fresh view instead of reusing this one -->
       <TaskDetail
+        :key="taskId"
         :task-id="taskId"
         :read-only-mode="Boolean(space?.archived_at) || $readOnlyMode"
       />
@@ -74,7 +76,6 @@ const space = useSpace(() => task.doc?.project || props.spaceId)
 const route = useRoute()
 
 const taskTitle = computed(() => task.doc?.title || 'Task')
-const isSpaceTask = computed(() => Boolean(space.value || props.spaceId))
 const backRoute = computed<RouteLocationRaw>(() => {
   const spaceId = space.value?.name || props.spaceId
   const communityId = space.value?.team || props.communityId

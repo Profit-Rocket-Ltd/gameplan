@@ -1,16 +1,19 @@
 <template>
   <div class="relative flex h-full flex-col" v-if="postId">
     <PageHeaderMobile class="sm:hidden" :title="mobileHeaderTitle">
-      <template #left>
-        <PageHeaderBackButton :to="backRoute" />
+      <template #prefix>
+        <PageHeaderBackButton :fallback-route="backRoute" />
       </template>
     </PageHeaderMobile>
     <PageHeader class="hidden sm:flex">
       <SpaceBreadcrumbs
-        class="flex"
+        class="flex print:hidden"
         :spaceId="currentSpaceId"
         :items="[{ label: discussion.doc?.title || postId, onClick: scrollToTop }]"
       />
+      <span class="hidden text-md-medium text-ink-gray-8 print:inline">
+        {{ [communityTitle, space?.title].filter(Boolean).join(' / ') }}
+      </span>
     </PageHeader>
     <div class="discussion-container">
       <div v-if="discussion.loading">
@@ -35,7 +38,7 @@
           </div>
         </div>
         <div class="flex items-start justify-between space-x-1">
-          <h1 class="flex items-center text-4xl-semibold animate-pulse">
+          <h1 class="flex items-center text-3xl-semibold animate-pulse">
             <span class="bg-surface-gray-3 h-5.5 w-32"> </span>
             <span class="bg-surface-gray-3 h-5.5 w-20 ml-2"> </span>
             <span class="bg-surface-gray-3 h-5.5 w-40 ml-2"> </span>
@@ -45,16 +48,29 @@
       <template v-else-if="discussion.doc">
         <div
           :class="{
-            'rounded-lg border mt-14 py-4 px-3 sm:px-5 -mx-3 sm:-mx-5 focus-within:border-outline-gray-3':
+            'rounded-6 border mt-14 py-4 px-3 sm:px-5 -mx-3 sm:-mx-5 focus-within:border-outline-gray-3':
               editingPost,
           }"
           @keydown.ctrl.enter.capture.stop="updatePost"
           @keydown.meta.enter.capture.stop="updatePost"
           @keydown.esc="cancelEdit"
         >
+          <!--
+            While pinned, this row masks the content scrolling under it, so it has to
+            be at least as wide as anything that content can paint. A selected image
+            draws a ring 4px outside its own box, and that box is already the full
+            width of the column. A row that stopped at the column edge left the ring's
+            two vertical edges visible above it, running up to the page header. The
+            negative margins bleed the row out to the container's padding edge, and the
+            padding puts its contents back where they were.
+          -->
           <div
-            class="flex w-full items-center bg-surface-base pb-2 pt-2"
-            :class="editingPost ? 'sm:pt-0' : 'sticky -top-px z-[1] sm:top-0 sm:pt-14'"
+            class="flex items-center bg-surface-base pb-2 pt-2"
+            :class="
+              editingPost
+                ? 'w-full sm:pt-0'
+                : 'sticky -top-px z-[1] -mx-3 px-3 sm:-mx-5 sm:px-5 sm:top-0 sm:pt-14'
+            "
           >
             <UserProfileLink class="mr-3" :user="discussion.doc.owner">
               <UserAvatarWithHover class="sm:hidden" size="xl" :user="discussion.doc.owner" />
@@ -66,7 +82,7 @@
             </UserProfileLink>
             <div class="flex flex-col md:block">
               <UserProfileLink
-                class="text-md-medium text-ink-gray-8 hover:text-ink-blue-8 sm:text-base-medium"
+                class="text-md-medium text-ink-gray-8 hover:text-ink-gray-9 sm:text-base-medium"
                 :user="discussion.doc.owner"
               >
                 {{ $user(discussion.doc.owner).full_name }}
@@ -97,7 +113,7 @@
           </div>
           <div :class="{ 'pb-4 mt-1': !editingPost }">
             <div class="flex items-start justify-between space-x-1">
-              <h1 v-if="!editingPost" class="flex items-center text-4xl-semibold" ref="postTitleEl">
+              <h1 v-if="!editingPost" class="flex items-center text-3xl-semibold" ref="postTitleEl">
                 <Tooltip v-if="discussion.doc.closed_at" text="This discussion is closed">
                   <span class="lucide-lock mr-2 h-4 w-4 text-ink-gray-6" />
                 </Tooltip>
@@ -129,17 +145,27 @@
                 <input
                   v-if="editingPost"
                   type="text"
-                  class="w-full bg-transparent border-0 text-ink-gray-8 px-0 py-0.5 text-4xl-semibold focus:ring-0"
+                  class="w-full bg-transparent border-0 text-ink-gray-8 px-0 py-0.5 text-3xl-semibold focus:ring-0"
                   ref="title"
-                  v-model="postDraftData.title"
+                  v-model="postTitle"
                   placeholder="Title"
                   :disabled="isPostDraftLoading"
                 />
               </div>
             </div>
+            <!-- An empty body renders as nothing at all, which reads as a broken page rather
+                 than an empty post. Say so explicitly. -->
+            <p
+              v-if="!editingPost && isEditorContentEmpty(discussion.doc.content)"
+              class="text-p-base text-ink-gray-5"
+            >
+              This post has no content.
+            </p>
             <DiscussionViewEditor
               ref="postEditor"
-              :content="editingPost ? postDraftData.content : discussion.doc.content"
+              :content="
+                editingPost && postDraftData ? postDraftData.content : discussion.doc.content
+              "
               :editable="editingPost && !isPostDraftLoading"
               :saving="discussion.setValue.loading"
               :can-save="canSavePost"
@@ -154,7 +180,6 @@
             <Reactions
               doctype="GP Discussion"
               :name="discussion.doc.name"
-              v-model:reactions="discussion.doc.reactions"
               :read-only-mode="readOnlyMode"
             />
           </div>
@@ -169,6 +194,7 @@
           :hide-new-comment="editingPost"
           :activity-version="discussion.doc.modified"
           ref="commentsArea"
+          @composer-resize="scheduleScrollToTopPlacement"
         />
         <QuoteBacklinksPopover :store="richQuotes" @select="scrollToQuotingComment" />
         <Dialog
@@ -244,6 +270,7 @@
                         pinDialog.show = false
                         pinDialog.pinToCategory = false
                       })
+                      .catch(() => {})
                   }
                 "
               >
@@ -260,24 +287,39 @@
         />
       </template>
       <EmptyStateBox v-else-if="notFound" class="mx-auto mt-14 max-w-2xl px-6">
-        <LucideTriangleAlert class="mb-3 size-7 text-ink-gray-4" />
+        <span class="lucide-triangle-alert mb-3 size-7 text-ink-gray-4" aria-hidden="true" />
         <div class="text-base text-ink-gray-7">Discussion not found</div>
         <p class="mt-2 max-w-md text-center text-p-sm text-ink-gray-5">
           This discussion may have been deleted, or you no longer have access to it. Refresh to try
           again.
         </p>
       </EmptyStateBox>
+      <!-- Fetch finished, but there is no doc and no recognised not-found/forbidden error.
+           Fail visibly instead of rendering a blank page. Gated on isFinished so the
+           pre-fetch tick (useFetch defers its first execute by a microtask) doesn't flash
+           an error. -->
+      <EmptyStateBox v-else-if="discussion.isFinished" class="mx-auto mt-14 max-w-2xl px-6">
+        <span class="lucide-triangle-alert mb-3 size-7 text-ink-gray-4" aria-hidden="true" />
+        <div class="text-base text-ink-gray-7">Could not load this discussion</div>
+        <p class="mt-2 max-w-md text-center text-p-sm text-ink-gray-5">
+          Something went wrong while loading it. Refresh to try again.
+        </p>
+      </EmptyStateBox>
     </div>
     <div
       v-if="!isMobileViewport && !editingPost"
-      class="fixed bottom-3 h-9 grid place-content-center right-3 z-[2] print:hidden"
+      ref="scrollToTopControl"
+      class="fixed right-3 z-[2] grid h-9 place-content-center print:hidden"
+      :style="{ bottom: `${scrollToTopBottomOffset}px` }"
     >
-      <Button variant="ghost" v-show="isScrolled" @click="scrollToTop">
-        <template #prefix>
-          <span class="lucide-arrow-up h-5 w-5 text-ink-gray-6" />
-        </template>
-        Scroll to top
-      </Button>
+      <Button
+        v-if="showScrollToTop"
+        variant="ghost"
+        icon="lucide-arrow-up"
+        label="Scroll to top"
+        tooltip="Scroll to top"
+        @click="scrollToTop"
+      />
     </div>
   </div>
 </template>
@@ -308,8 +350,9 @@ import {
   dayjsLocal,
   Switch,
   dialog,
+  toast,
 } from 'frappe-ui'
-import { until } from '@vueuse/core'
+import { until, useEventListener } from '@vueuse/core'
 import type { Editor } from '@tiptap/vue-3'
 import Reactions from './Reactions.vue'
 import UserAvatarWithHover from './UserAvatarWithHover.vue'
@@ -320,20 +363,24 @@ import UserProfileLink from './UserProfileLink.vue'
 const RevisionsDialog = defineAsyncComponent(() => import('./RevisionsDialog.vue'))
 import SpaceBreadcrumbs from './SpaceBreadcrumbs.vue'
 import EmptyStateBox from './EmptyStateBox.vue'
-import { copyToClipboard } from '@/utils'
+import { copyToClipboard, isEditorContentEmpty } from '@/utils'
 import { getSpace, useSpace } from '@/data/spaces'
 import { useCommunity } from '@/data/communities'
 import { useGroupedSpaceOptions } from '@/data/groupedSpaces'
 import { useDiscussion } from '@/data/discussions'
+import { provideThreadReactions } from '@/data/reactions'
 import { useDraftSync } from '@/data/useDraftSync'
 import { tags } from '@/data/tags'
-import { useScrollContainer, useIsMobile } from 'frappe-ui'
+import { shellScrollContainer, useShellScrolled } from 'frappe-ui'
+import { useIsMobile } from '@/utils/useIsMobile'
 import { provideRichQuotes } from '@/components/RichQuoteExtension/useRichQuotes'
 import QuoteBacklinksPopover from '@/components/RichQuoteExtension/QuoteBacklinksPopover.vue'
 import { refreshUnreadCountForProjects } from '@/data/unreadCount'
 import { useSessionUser } from '@/data/users'
-import { canDeleteContent, canEditContent } from '@/utils/permissions'
+import { canDeleteContent, canEditContent, canMoveOrPinContent } from '@/utils/permissions'
+import { captureError } from '@/utils/errorReporting'
 import { useCommandPaletteCommands } from './CommandPalette/registry'
+import { useOwnedRouteWrites } from '@/composables/useOwnedRouteWrites'
 
 const props = defineProps<{
   postId: string
@@ -342,14 +389,69 @@ const props = defineProps<{
 
 const router = useRouter()
 const route = useRoute()
+// This view also renders behind the settings overlay, where the URL belongs to /settings/*.
+// Rewriting it from there would both throw (no postId param to spread) and navigate the app
+// off the settings route, closing the dialog. A page may only rewrite a URL it owns.
+const runWhenOwned = useOwnedRouteWrites(() => route.name === 'Discussion')
 const isMobileViewport = useIsMobile()
 const commentsArea = useTemplateRef('commentsArea')
+const scrollToTopControl = useTemplateRef<HTMLElement>('scrollToTopControl')
 const postEditor = useTemplateRef<{ editor: Editor | null }>('postEditor')
 const mainPostContentEl = ref<HTMLElement | null>(null)
 const postTitleEl = useTemplateRef<HTMLElement>('postTitleEl')
 
-const { isScrolled, scrollToTop, el: scrollContainerEl } = useScrollContainer()
-const discussion = useDiscussion(() => props.postId)
+const scrollToTopThreshold = 200
+const scrollToTopRestingOffset = 12
+const scrollToTopComposerGap = 4
+const isScrolled = useShellScrolled({ threshold: scrollToTopThreshold })
+const scrollContainerEl = shellScrollContainer
+const showScrollToTop = ref(false)
+const scrollToTopBottomOffset = ref(scrollToTopRestingOffset)
+let scrollToTopPlacementFrame = 0
+
+function scheduleScrollToTopPlacement() {
+  if (scrollToTopPlacementFrame) return
+  scrollToTopPlacementFrame = requestAnimationFrame(() => {
+    scrollToTopPlacementFrame = requestAnimationFrame(() => {
+      scrollToTopPlacementFrame = 0
+      // Composer layout can clamp scrollTop without dispatching a scroll event.
+      // Read it after the layout has painted, then let the control mount before measuring.
+      showScrollToTop.value = (scrollContainerEl.value?.scrollTop ?? 0) > scrollToTopThreshold
+      nextTick(updateScrollToTopPlacement)
+    })
+  })
+}
+
+function updateScrollToTopPlacement() {
+  const control = scrollToTopControl.value
+  const composer = commentsArea.value?.composerElement
+  if (!control || !composer || !showScrollToTop.value) {
+    scrollToTopBottomOffset.value = scrollToTopRestingOffset
+    return
+  }
+
+  const controlRect = control.getBoundingClientRect()
+  const composerRect = composer.getBoundingClientRect()
+  // Test the control where it would sit without the composer. Measuring the
+  // already-raised rect would make the result oscillate between the two positions.
+  const restingBottom = window.innerHeight - scrollToTopRestingOffset
+  const restingTop = restingBottom - controlRect.height
+  const overlapsHorizontally =
+    controlRect.left < composerRect.right && controlRect.right > composerRect.left
+  const overlapsVertically = restingTop < composerRect.bottom && restingBottom > composerRect.top
+  scrollToTopBottomOffset.value =
+    overlapsHorizontally && overlapsVertically
+      ? window.innerHeight - composerRect.top + scrollToTopComposerGap
+      : scrollToTopRestingOffset
+}
+
+watch(isScrolled, scheduleScrollToTopPlacement)
+useEventListener(window, 'resize', scheduleScrollToTopPlacement)
+
+function scrollToTop() {
+  shellScrollContainer.value?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+const discussion = useDiscussion(props.postId)
 // In-app navigation skips the router's server canonicalization for speed, so a stale link to a
 // discussion deleted or moved out of reach after local data loaded would otherwise render a blank
 // detail view. Show a not-found state in place (keeping the URL) rather than redirecting to the
@@ -371,6 +473,7 @@ const mobileHeaderTitle = computed(() =>
   showTitleInMobileHeader.value ? discussion.doc?.title || 'Discussion' : 'Discussion',
 )
 
+provideThreadReactions('GP Discussion', props.postId)
 const richQuotes = provideRichQuotes()
 richQuotes.setPostContentEl(() => mainPostContentEl.value)
 
@@ -417,8 +520,20 @@ const postDraft = useDraftSync({
 const postDraftData = postDraft.data
 const isPostDraftLoading = postDraft.isLoading
 
+// Writable view of the draft's title. The input keeps its place in the layout while the
+// draft resolves, so it has to read as empty and swallow writes until then.
+const postTitle = computed({
+  get: () => postDraftData.value?.title ?? '',
+  set: (value: string) => {
+    if (postDraftData.value) postDraftData.value.title = value
+  },
+})
+
 function onPostEditorChange(value: string) {
-  if (editingPost.value) postDraftData.value.content = value
+  // Ignored unless this editor is in edit mode with a resolved draft behind it — while it
+  // displays the saved post, or while the draft is still loading, it owns no buffer.
+  if (!editingPost.value || !postDraftData.value) return
+  postDraftData.value.content = value
 }
 
 // The scroll container is owned by the shell (Desktop/MobileShell) and registers
@@ -439,6 +554,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  cancelAnimationFrame(scrollToTopPlacementFrame)
   scrollContainerEl.value?.removeEventListener('scroll', updateMobileHeaderTitle)
 })
 
@@ -483,6 +599,7 @@ async function scrollToUnread() {
 
   let doc = discussion.doc
   if (
+    route.name === 'Discussion' &&
     !route.query.comment &&
     !route.query.poll &&
     !route.query.fromSearch &&
@@ -504,9 +621,12 @@ async function scrollToUnread() {
   }
 
   if (route.name === 'Discussion' && route.params.postId === doc?.name) {
-    discussion.trackVisit.submit().then(() => {
-      refreshUnreadCountForProjects([doc.project])
-    })
+    discussion.trackVisit
+      .submit()
+      .then(() => {
+        refreshUnreadCountForProjects([doc.project])
+      })
+      .catch(() => {})
   }
 }
 
@@ -517,7 +637,9 @@ function copyLink() {
   copyToClipboard(url)
 }
 
-// Undefined falls through to PageHeaderBackButton's router.back() fallback.
+// Cold-load fallback only: PageHeaderBackButton walks history when there is any.
+// Undefined leaves it with nothing to recover to, which is right for a discussion
+// reached without a community in the URL.
 const backRoute = computed<RouteLocationRaw | undefined>(() => {
   const communityId = routeParam(route.params.communityId)
   const spaceId = routeParam(route.params.spaceId)
@@ -574,7 +696,13 @@ function moveToSpace() {
   }
 }
 
-const canSavePost = computed(() => Boolean(postDraftData.value.title?.trim()))
+// A post needs both halves: saving an empty body over a real one leaves a post that renders
+// as a blank page for everyone, with no way back except the revision history.
+const canSavePost = computed(
+  () =>
+    Boolean(postDraftData.value?.title?.trim()) &&
+    !isEditorContentEmpty(postDraftData.value?.content),
+)
 
 // Read content from the editor's own serializer rather than discussion.doc.content:
 // the editor re-normalizes HTML on load and writes it back, so the stored value
@@ -601,7 +729,7 @@ function startEditingPost() {
 function isPostDirty() {
   if (!editSnapshot.value) return false
   return (
-    (postDraftData.value.title ?? '') !== editSnapshot.value.title ||
+    (postDraftData.value?.title ?? '') !== editSnapshot.value.title ||
     currentPostContent() !== editSnapshot.value.content
   )
 }
@@ -631,21 +759,39 @@ function cancelEdit() {
 
 function updatePost() {
   if (!editingPost.value || !canSavePost.value) return
+  // Show the new title at once instead of the old one until the server answers.
+  const title = postDraftData.value?.title
+  const previousTitle = discussion.doc?.title
+  if (discussion.doc && title) discussion.doc.title = title
   discussion.setValue
     .submit({
-      title: postDraftData.value.title,
-      content: postDraftData.value.content,
+      title,
+      content: postDraftData.value?.content,
     })
-    .then(async () => {
-      // Content is saved onto the post; migrate the draft's attachments and delete it.
-      await postDraft.commit()
-      tags.reload()
-    })
+    .then(
+      async () => {
+        // Content is saved onto the post; migrate the draft's attachments and delete it.
+        await postDraft.commit()
+        tags.reload()
+      },
+      () => {
+        // The save failed: put the old title back, unless something newer replaced it.
+        const doc = discussion.doc
+        if (doc && doc.title === title && previousTitle !== undefined) doc.title = previousTitle
+        toast.error('Could not save the discussion')
+      },
+    )
   editingPost.value = false
   editSnapshot.value = null
 }
 
+// Runs once per visit, when the doc resolves — so if the URL is not ours at that moment,
+// the correction has to wait for it rather than be dropped for the rest of the visit.
 function canonicalizeRoute() {
+  runWhenOwned(applyCanonicalRoute)
+}
+
+function applyCanonicalRoute() {
   let doc = discussion.doc
   if (!doc) return
 
@@ -701,11 +847,16 @@ const spaceOptions = useGroupedSpaceOptions({
   filterFn: (space) => !space.archived_at && space.name !== discussion.doc?.project,
 })
 
-// Edit and the lifecycle actions (pin/close/move) all change the post itself, so
-// they follow the same business rule as editing — hidden from guests on posts they
-// don't own. Mirrors backend can_edit_content (see utils/permissions.ts).
+// Edit and close/re-open change the post itself, so they follow the same business
+// rule as editing: hidden from guests on posts they don't own. Mirrors backend
+// can_edit_content (see utils/permissions.ts).
 const canEditDiscussion = computed(() =>
   canEditContent(discussion.doc, space.value, useSessionUser()),
+)
+// Pin and move are narrower than edit: a guest may edit their own post but may not
+// move it to another space or pin it.
+const canMoveOrPinDiscussion = computed(() =>
+  canMoveOrPinContent(discussion.doc, space.value, useSessionUser()),
 )
 
 const actions = computed(() => [
@@ -729,23 +880,31 @@ const actions = computed(() => [
     label: 'Mark as unread',
     icon: 'lucide-mail',
     onClick: () => {
-      discussion.markAsUnread.submit().then(() => {
-        if (discussion.doc?.project) {
-          refreshUnreadCountForProjects([discussion.doc.project])
-        }
-      })
+      discussion.markAsUnread
+        .submit()
+        .then(() => {
+          if (discussion.doc?.project) {
+            refreshUnreadCountForProjects([discussion.doc.project])
+          }
+        })
+        .catch(() => {})
     },
   },
   {
     label: 'Bookmark',
     icon: 'lucide-bookmark',
-    onClick: () => discussion.addBookmark.submit(),
+    onClick: () =>
+      discussion.addBookmark
+        .submit()
+        .catch((error) =>
+          captureError(error, { action: 'add-bookmark', discussion: props.postId }),
+        ),
     condition: () => !discussion.doc?.is_bookmarked,
   },
   {
     label: 'Pin discussion...',
     icon: 'lucide-arrow-up-left',
-    condition: () => canEditDiscussion.value && !discussion.doc?.pinned_at,
+    condition: () => canMoveOrPinDiscussion.value && !discussion.doc?.pinned_at,
     onClick: () => {
       pinDialog.show = true
     },
@@ -753,7 +912,7 @@ const actions = computed(() => [
   {
     label: 'Unpin discussion...',
     icon: 'lucide-arrow-down-left',
-    condition: () => canEditDiscussion.value && !!discussion.doc?.pinned_at,
+    condition: () => canMoveOrPinDiscussion.value && !!discussion.doc?.pinned_at,
     onClick: () => {
       const pinScope = discussion.doc?.pin_scope
       const scopeText =
@@ -802,13 +961,18 @@ const actions = computed(() => [
   {
     label: 'Remove Bookmark',
     icon: 'lucide-bookmark',
-    onClick: () => discussion.removeBookmark.submit(),
+    onClick: () =>
+      discussion.removeBookmark
+        .submit()
+        .catch((error) =>
+          captureError(error, { action: 'remove-bookmark', discussion: props.postId }),
+        ),
     condition: () => discussion.doc?.is_bookmarked,
   },
   {
     label: 'Move to...',
     icon: 'lucide-log-out',
-    condition: () => canEditDiscussion.value,
+    condition: () => canMoveOrPinDiscussion.value,
     onClick: () => {
       discussionMoveDialog.show = true
     },

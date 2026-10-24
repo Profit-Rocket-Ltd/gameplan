@@ -18,7 +18,7 @@
         @pointercancel="endDrag"
       >
         <div class="pointer-events-none text-center">
-          <div class="rounded-md py-1 text-xl text-ink-base">Drag image up or down</div>
+          <div class="rounded-5 py-1 text-lg text-ink-base">Drag image up or down</div>
           <div class="pointer-events-auto" data-cover-control @pointerdown.stop>
             <Button class="mt-2" @click="savePosition">Save position</Button>
             <Button class="ml-2 mt-2" @click="cancelReposition">Cancel</Button>
@@ -40,8 +40,8 @@
             }
           "
         >
-          <template v-slot="{ togglePopover }">
-            <Button variant="outline" @click="togglePopover()"> Change Image </Button>
+          <template v-slot>
+            <Button variant="outline"> Change Image </Button>
           </template>
         </UnsplashImageBrowser>
         <Button v-if="editable" variant="outline" @click="beginReposition"> Reposition </Button>
@@ -62,8 +62,8 @@
           }
         "
       >
-        <template v-slot="{ togglePopover }">
-          <Button variant="outline" @click="togglePopover()"> Click to set cover image </Button>
+        <template v-slot>
+          <Button variant="outline"> Click to set cover image </Button>
         </template>
       </UnsplashImageBrowser>
     </div>
@@ -106,7 +106,8 @@ export default {
     validatedImageUrl: {
       async handler(newVal, oldVal) {
         if (newVal !== oldVal) {
-          this.imageDimensions = await getImgDimensions(newVal)
+          // null when there is no cover, or when the image failed to load.
+          this.imageDimensions = newVal ? await getImgDimensions(newVal) : null
         }
       },
       immediate: true,

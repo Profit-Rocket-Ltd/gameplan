@@ -16,17 +16,18 @@
     </div>
 
     <template v-if="isInitialLoading">
-      <DiscussionRowSkeleton
+      <ListRowSkeleton
         v-for="index in skeletonRowCount"
         :key="index"
         :show-separator="index < skeletonRowCount"
+        label="Loading discussion"
       />
     </template>
 
     <List :selectable="selectable" v-model:selection="selectedDiscussions" :class="listClass">
       <DiscussionRow
         v-for="discussion of discussions.data"
-        :key="discussion.name"
+        :key="discussion.bookmark || discussion.name"
         :discussion="discussion"
         :showSpaceName="!filters || !filters.project"
       />
@@ -55,7 +56,7 @@ import type { OrderBy } from 'frappe-ui'
 import { List } from 'frappe-ui/list'
 import { UseDiscussionOptions, useDiscussions } from '@/data/discussions'
 import DiscussionRow from './DiscussionRow.vue'
-import DiscussionRowSkeleton from './DiscussionRowSkeleton.vue'
+import ListRowSkeleton from './ListRowSkeleton.vue'
 import EmptyStateBox from './EmptyStateBox.vue'
 import Pin from './icons/Pin.vue'
 
@@ -89,10 +90,15 @@ const pinnedDiscussions = useDiscussions({
     const baseFilters = toValue(props.filters)
 
     if (baseFilters?.project) {
+      // A community pin is a superset of a space pin — "Show in all <community>
+      // discussions" has to include the discussion's own space, or the pin is
+      // invisible everywhere the author looks for it. This also brings back every
+      // pre-2025-10 pin, which set_default_pin_scope + rename_global_pin_scope_to_category
+      // stamped `Category` without ever asking the user to pick a scope.
       return {
         ...baseFilters,
         pinned_at: ['is', 'set'],
-        pin_scope: 'Space',
+        pin_scope: ['in', ['Space', 'Category']],
       }
     }
 

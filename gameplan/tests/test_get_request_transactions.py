@@ -24,7 +24,7 @@ import frappe
 from frappe.auth import CookieManager, LoginManager
 from frappe.tests.test_api import FrappeAPITestCase
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import get_test_client, set_request, today
+from frappe.utils import get_test_client, set_request, sha256_hash, today
 
 import gameplan
 from gameplan.tests.fixtures import declared_http_methods
@@ -48,6 +48,8 @@ READ_ONLY_ENDPOINTS = frozenset(
 		"gameplan.api.get_user_info",
 		"gameplan.api.unread_notifications",
 		"gameplan.api.get_unsplash_photos",
+		# Unsplash proxy. Talks to a third party with our key and writes nothing of ours.
+		"gameplan.unsplash.search_photos",
 		# Search. The SQLite index lives outside the transaction, but these only query it.
 		"gameplan.api.search_sqlite",
 		"gameplan.api.get_search_filter_options",
@@ -60,12 +62,18 @@ READ_ONLY_ENDPOINTS = frozenset(
 		# Revision history.
 		"gameplan.gameplan.doctype.gp_comment.gp_comment.GPComment.get_revisions",
 		"gameplan.gameplan.doctype.gp_discussion.gp_discussion.GPDiscussion.get_revisions",
+		# Reactions on a thread's posts.
+		"gameplan.gameplan.doctype.gp_discussion.gp_discussion.GPDiscussion.thread_reactions",
+		"gameplan.gameplan.doctype.gp_task.gp_task.GPTask.thread_reactions",
 		# Space membership, activity and unread counters.
 		"gameplan.gameplan.doctype.gp_project.gp_project.get_joined_spaces",
 		"gameplan.gameplan.doctype.gp_project.gp_project.get_activity",
 		"gameplan.gameplan.doctype.gp_project.gp_project.get_unread_count",
 		"gameplan.gameplan.doctype.gp_unread_record.api.get_unread_count",
 		"gameplan.gameplan.doctype.gp_unread_record.api.get_participating_unread_count",
+		# The Drafts list. Collapses duplicate reply drafts in its response but writes nothing;
+		# find_my_draft is what destroys the stale sibling, on its own POST path.
+		"gameplan.gameplan.doctype.gp_draft.gp_draft.get_my_drafts",
 		# Profile reads.
 		"gameplan.gameplan.doctype.gp_user_profile.gp_user_profile.get_last_post",
 		"gameplan.gameplan.doctype.gp_user_profile.gp_user_profile.get_my_bento_cards",
@@ -75,11 +83,11 @@ READ_ONLY_ENDPOINTS = frozenset(
 
 # The only mutations allowed to stay GET-reachable. Both are the target of a link in an
 # outbound email, so the browser arrives with a plain navigation and cannot POST, and
-# both commit explicitly (via session creation) rather than relying on the request's
-# transaction. The two `..._invitation_acceptance_persists_after_get` tests below prove
-# that the commit really happens.
+# both commit explicitly rather than relying on the request's transaction. The two
+# `..._invitation_acceptance_persists_after_get` tests below prove that the commit
+# really happens.
 DELIBERATE_GET_MUTATIONS = {
-	"gameplan.api.accept_invitation": "invitation email link; the login it performs commits",
+	"gameplan.api.accept_invitation": "invitation email link; commits the acceptance and any password link",
 	"gameplan.email_digest.open_digest_preferences": "digest email link; logs the user in, then redirects",
 }
 
@@ -287,9 +295,9 @@ class TestGetRequestTransactions(FrappeAPITestCase):
 		self.assertTrue(frappe.db.get_value("GP Team", team.name, "archived_at"))
 
 	def test_existing_user_invitation_acceptance_persists_after_get(self):
-		"""The email link remains a GET because both successful branches commit explicitly.
+		"""The email link remains a GET because the endpoint commits explicitly.
 
-		An established user follows the login branch, whose session creation commits the accepted
+		An established user is sent to the app, and the endpoint commits the accepted
 		invitation before Frappe's end-of-request GET rollback runs.
 		"""
 		suffix = frappe.generate_hash(length=8)
@@ -302,7 +310,7 @@ class TestGetRequestTransactions(FrappeAPITestCase):
 			doctype="GP Invitation",
 			email=user.name,
 			role="Gameplan Admin",
-			key=key,
+			key=sha256_hash(key),
 			status="Pending",
 			invited_by="Administrator",
 		)
@@ -334,7 +342,7 @@ class TestGetRequestTransactions(FrappeAPITestCase):
 			doctype="GP Invitation",
 			email=email,
 			role="Gameplan Member",
-			key=key,
+			key=sha256_hash(key),
 			status="Pending",
 			invited_by="Administrator",
 		)
@@ -358,8 +366,12 @@ class TestGetRequestTransactions(FrappeAPITestCase):
 		)
 		self.assertTrue(frappe.db.get_value("User", email, "reset_password_key"))
 
-	def test_get_my_drafts_post_persists_duplicate_cleanup(self):
-		"""The POST returns the newest reply draft and permanently removes stale duplicates."""
+	def test_get_my_drafts_reads_without_writing(self):
+		"""The Drafts list is a plain read, so it may be a GET.
+
+		It still shows one row per reply, but it collapses duplicates in the response only and
+		leaves both rows on disk. Destroying the stale sibling is find_my_draft's job, on the
+		POST path where the delete survives the end-of-request rollback."""
 		suffix = frappe.generate_hash(length=8)
 		user = create_member(f"get_drafts_{suffix}@example.com", "GET Drafts")
 		self.users.append(user.name)
@@ -382,7 +394,7 @@ class TestGetRequestTransactions(FrappeAPITestCase):
 		frappe.db.commit()
 		self.login_as(user.name)
 
-		response = self.post(self.method("gameplan.gameplan.doctype.gp_draft.gp_draft.get_my_drafts"), {})
+		response = self.get(self.method("gameplan.gameplan.doctype.gp_draft.gp_draft.get_my_drafts"))
 
 		self.assertEqual(response.status_code, 200, response.text)
 		self.assertEqual([draft["name"] for draft in response.json["message"]], [newer.name])
@@ -390,4 +402,4 @@ class TestGetRequestTransactions(FrappeAPITestCase):
 		stored = frappe.get_all(
 			"GP Draft", filters={"owner": user.name, **fields}, order_by="modified desc", pluck="name"
 		)
-		self.assertEqual(stored, [newer.name])
+		self.assertEqual(stored, [newer.name, older.name])

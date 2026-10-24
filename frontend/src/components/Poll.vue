@@ -1,8 +1,31 @@
 <template>
   <div class="relative">
+    <DefinePollActions>
+      <Button
+        v-if="!embedded && canStopPoll"
+        variant="ghost"
+        icon-left="lucide-minus-circle"
+        @click="stopPoll"
+      >
+        Stop Poll
+      </Button>
+      <Tooltip v-else-if="!embedded" text="This is a poll">
+        <span class="lucide-bar-chart-2 h-4 w-4 -rotate-90" />
+      </Tooltip>
+      <Dropdown
+        v-if="dropdownOptions.some((option) => option.condition())"
+        align="end"
+        :button="{
+          icon: 'lucide-more-horizontal',
+          variant: 'ghost',
+          label: 'Poll Options',
+        }"
+        :options="dropdownOptions"
+      />
+    </DefinePollActions>
     <div
       v-if="highlight"
-      class="absolute inset-0 translate-y- z-[5] rounded border-2 -mx-4 -mb-4 mt-11 pointer-events-none"
+      class="absolute inset-0 translate-y- z-[5] rounded-4 border-2 -mx-4 -mb-4 mt-11 pointer-events-none"
     />
     <!-- Mirrors the comment header (Comment.vue). Two parts matter and both were missing:
          `z-[1]`, or the option rows (positioned so the result bar can fill behind them)
@@ -10,13 +33,14 @@
          app header's height so scrolled-up content is masked rather than showing through
          the strip above it. The previous `pt-15` was not a real utility, so it did nothing. -->
     <div
+      v-if="!embedded"
       class="sticky -top-px z-[1] -mx-2 flex items-center bg-surface-base px-2 pb-2 pt-2 text-base text-ink-gray-8 sm:top-0 sm:pt-14"
     >
       <UserProfileLink class="mr-3" :user="owner.name">
         <UserAvatarWithHover :user="owner.name" size="lg" />
       </UserProfileLink>
       <div class="md:flex md:items-center">
-        <UserProfileLink class="font-medium hover:text-ink-blue-8" :user="owner.name">
+        <UserProfileLink class="font-medium hover:text-ink-gray-9" :user="owner.name">
           {{ owner.full_name }}
           <span class="hidden md:inline">&nbsp;&middot;&nbsp;</span>
         </UserProfileLink>
@@ -29,29 +53,15 @@
         </div>
       </div>
       <div class="ml-auto flex items-center space-x-2">
-        <Button
-          v-if="!isStopped && !readOnlyMode && canDeletePoll"
-          variant="ghost"
-          icon-left="lucide-minus-circle"
-          @click="stopPoll"
-        >
-          Stop Poll
-        </Button>
-        <Tooltip v-else text="This is a poll">
-          <span class="lucide-bar-chart-2 h-4 w-4 -rotate-90" />
-        </Tooltip>
-        <Dropdown
-          align="end"
-          :button="{
-            icon: 'lucide-more-horizontal',
-            variant: 'ghost',
-            label: 'Poll Options',
-          }"
-          :options="dropdownOptions"
-        />
+        <ReusePollActions />
       </div>
     </div>
-    <div class="text-base-semibold text-ink-gray-8">{{ _poll.title }}</div>
+    <div class="flex items-center gap-2">
+      <div class="flex-1 text-base-semibold text-ink-gray-8">{{ _poll.title }}</div>
+      <div v-if="embedded" class="flex items-center space-x-2">
+        <ReusePollActions />
+      </div>
+    </div>
     <div class="mt-1 text-sm text-ink-gray-5">
       <span v-if="_poll.multiple_answers"> Multiple answers &middot; </span>
       <span v-if="_poll.anonymous"> Anonymous &middot; </span>
@@ -61,25 +71,58 @@
     <!-- Twitter-style: once results are visible the row itself becomes the bar, with the
          share filled in behind the label. Capped to a readable measure — a bar spanning
          the full thread width reads as a progress indicator, not a share of the vote. -->
-    <div class="my-4 max-w-sm space-y-1.5">
+    <!-- A single-answer poll is a radiogroup, so the group owns the row spacing; a
+         multiple-answer poll is a plain list of independent checkboxes and spaces
+         itself. -->
+    <component
+      :is="isSingleChoice ? RadioGroup : 'div'"
+      v-bind="optionGroupProps"
+      class="my-4 max-w-sm"
+      :class="{ 'space-y-1.5': !isSingleChoice }"
+    >
       <div
         v-for="option in _poll.options"
         :key="option.idx"
-        class="relative -mx-2 overflow-hidden rounded"
+        class="relative overflow-hidden rounded-4"
+        :class="embedded ? 'bg-surface-gray-1' : '-mx-2'"
         :data-poll-option="option.title"
       >
         <div
           v-if="showResults"
-          class="absolute inset-y-0 left-0 rounded transition-[width] duration-500 ease-out"
+          class="absolute inset-y-0 left-0 rounded-4 transition-[width] duration-500 ease-out"
           :class="isVotedByUser(option.title) ? 'bg-surface-gray-4' : 'bg-surface-gray-2'"
           :style="{ width: `${option.percentage || 0}%` }"
           aria-hidden="true"
         />
         <div class="relative flex h-7 items-center justify-between gap-3 px-2">
+          <!-- One answer per voter is a radio, not a tick: picking an option replaces
+               the previous answer and there is nothing to clear, which is exactly what
+               a radio offers and a checkbox does not. Clearing a single answer is the
+               "Retract vote" item in the poll menu.
+
+               Radio sizes the circle and the label as flex items that grow to their
+               content, so a long option would run past the row instead of truncating in
+               it: the classes unlock the shrink chain down to the label, then give the
+               label the width its own truncation measures against. -->
+          <Radio
+            v-if="isSingleChoice"
+            :id="optionId(option)"
+            :value="option.title"
+            class="min-w-0 [&>span:last-child]:min-w-0 [&_[data-slot=label]]:w-full"
+          >
+            <template #label>
+              <span
+                class="block truncate text-ink-gray-8"
+                :class="{ 'font-medium': isVotedByUser(option.title) }"
+              >
+                {{ option.title }}
+              </span>
+            </template>
+          </Radio>
           <!-- Checkbox's own label is top-aligned to the first line of a wrapping label,
                which leaves the box high against a single-line one. Pair it with our own
                <label for> instead so the row can centre them. -->
-          <div class="flex min-w-0 items-center gap-2">
+          <div v-else class="flex min-w-0 items-center gap-2">
             <Checkbox
               size="md"
               :id="optionId(option)"
@@ -104,19 +147,22 @@
           </span>
         </div>
       </div>
-    </div>
+    </component>
     <!-- The tick moves optimistically, so a rejected vote has to say why it snapped back. -->
     <ErrorMessage class="-mt-2 mb-3" :message="voteError" />
-    <div class="mt-3">
-      <Reactions
-        doctype="GP Poll"
-        :name="poll.name"
-        v-model:reactions="_poll.reactions"
-        :read-only-mode="readOnlyMode"
-      />
+    <Button
+      v-if="embedded && !_poll.anonymous"
+      class="-mt-2"
+      variant="ghost"
+      @click="showDialog = true"
+    >
+      Show results
+    </Button>
+    <div v-if="!embedded" class="mt-3">
+      <Reactions doctype="GP Poll" :name="poll.name" :read-only-mode="readOnlyMode" />
     </div>
     <Dialog title="Poll results" v-model:open="showDialog">
-      <h2 class="text-xl-medium text-ink-gray-8">{{ _poll.title }}</h2>
+      <h2 class="text-lg-medium text-ink-gray-8">{{ _poll.title }}</h2>
       <div v-if="!pollResults" class="text-base text-ink-gray-6 mt-2">No votes yet</div>
       <div class="mt-6 space-y-6">
         <div v-for="option in pollResults" :key="option.title">
@@ -145,16 +191,20 @@
 </template>
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { createReusableTemplate } from '@vueuse/core'
 import {
   Checkbox,
   Dropdown,
   Dialog,
   ErrorMessage,
+  Radio,
+  RadioGroup,
   Tooltip,
   dayjsLocal,
   dialog,
   useDoc,
 } from 'frappe-ui'
+import type { RadioValue } from 'frappe-ui'
 import UserAvatar from './UserAvatar.vue'
 import UserAvatarWithHover from './UserAvatarWithHover.vue'
 import UserProfileLink from './UserProfileLink.vue'
@@ -173,6 +223,7 @@ interface Props {
   space?: Space | null
   // Archived space or site-wide read-only: the poll is visible but inert.
   readOnlyMode?: boolean
+  embedded?: boolean
 }
 
 interface PollMethods {
@@ -185,8 +236,10 @@ const props = withDefaults(defineProps<Props>(), {
   highlight: false,
   space: null,
   readOnlyMode: false,
+  embedded: false,
 })
 
+const [DefinePollActions, ReusePollActions] = createReusableTemplate()
 const showDialog = ref(false)
 const sessionUser = useSessionUser()
 const socket = useSocket()
@@ -226,10 +279,27 @@ const showResults = computed(() => participated.value || isStopped.value)
 // so greying every option for the round trip just makes a click flicker. Overlapping
 // clicks are handled by queueing them instead (see queueVote).
 const isOptionDisabled = computed(() => isStopped.value || props.readOnlyMode || voteIsFinal.value)
+const isSingleChoice = computed(() => !_poll.value.multiple_answers)
+// The radiogroup reads the same map the checkboxes do, so an optimistic pick and the
+// snap-back after a rejected vote behave identically for both controls.
+const selectedOption = computed(() =>
+  Object.keys(selectedAnswers).find((title) => selectedAnswers[title]),
+)
+const optionGroupProps = computed(() =>
+  isSingleChoice.value
+    ? {
+        size: 'md',
+        modelValue: selectedOption.value,
+        disabled: isOptionDisabled.value,
+        'onUpdate:modelValue': (value: RadioValue) => selectOption(String(value)),
+      }
+    : {},
+)
 const canDeletePoll = computed(() => canDeleteContent(_poll.value, props.space, sessionUser))
 const isStopped = computed(
   () => Boolean(_poll.value.stopped_at) && dayjsLocal().isAfter(_poll.value.stopped_at),
 )
+const canStopPoll = computed(() => !isStopped.value && !props.readOnlyMode && canDeletePoll.value)
 const totalLabel = computed(() => {
   const total = _poll.value.total_votes || 0
   if (!_poll.value.multiple_answers) {
@@ -266,10 +336,16 @@ const dropdownOptions = computed(() => [
   {
     label: 'Show results',
     icon: 'lucide-bar-chart-2',
-    condition: () => !_poll.value.anonymous,
+    condition: () => !props.embedded && !_poll.value.anonymous,
     onClick: () => {
       showDialog.value = true
     },
+  },
+  {
+    label: 'Stop poll',
+    icon: 'lucide-minus-circle',
+    condition: () => props.embedded && canStopPoll.value,
+    onClick: stopPoll,
   },
   {
     label: 'Retract vote',
@@ -292,12 +368,13 @@ const dropdownOptions = computed(() => [
   {
     label: 'Copy link',
     icon: 'lucide-link',
+    condition: () => !props.embedded,
     onClick: copyLink,
   },
   {
     label: 'Delete',
     icon: 'lucide-trash',
-    condition: () => !props.readOnlyMode && canDeletePoll.value,
+    condition: () => !props.embedded && !props.readOnlyMode && canDeletePoll.value,
     onClick: () => {
       dialog.danger({
         title: 'Delete poll',
@@ -332,11 +409,18 @@ async function handlePollUpdate(data: { doctype?: string; name?: string | number
   }
 }
 
+/** Picking a radio always casts a vote: a radiogroup cannot clear itself, so the only
+ *  way out of an answer is the "Retract vote" menu item. */
+function selectOption(title: string) {
+  const option = _poll.value.options.find((o) => o.title === title)
+  if (option) toggleOption(option, true)
+}
+
 /**
- * Every poll type votes through the same checkbox. What differs is what a tick means:
- * on a multiple-answer poll each option stands alone, on a single-answer poll ticking a
- * new option replaces the previous answer, and an anonymous vote is confirmed once and
- * never changed.
+ * Both controls vote through here. What differs is what a pick means: on a
+ * multiple-answer poll each option stands alone and can be cleared, on a single-answer
+ * poll picking a new option replaces the previous answer, and an anonymous vote is
+ * confirmed once and never changed.
  */
 async function toggleOption(option: GPPollOption, checked: boolean) {
   // Drive the tick from our own state rather than the checkbox's: a cancelled dialog or a
@@ -446,8 +530,9 @@ function formatPercentage(percentage?: number) {
   return Math.round(percentage || 0)
 }
 
-/** Ties each option's <label for> to its checkbox. Both parts are numeric, so it is a
- *  valid id even though option titles are free text. */
+/** Identifies one option's control: the target of the checkbox's <label for>, and a
+ *  stable id for the radio. Both parts are numeric, so it is a valid id even though
+ *  option titles are free text. */
 function optionId(option: GPPollOption) {
   return `poll-${props.poll.name}-option-${option.idx}`
 }

@@ -1,44 +1,60 @@
 <template>
   <PageHeaderMobile class="sm:hidden" title="Drafts">
-    <template #left>
+    <template #prefix>
       <Button v-if="isBulkDeleteMode" variant="ghost" size="md" @click="cancelBulkDelete">
         Cancel
       </Button>
-      <PageHeaderBackButton v-else :to="{ name: 'More' }" />
+      <PageHeaderBackButton v-else :fallback-route="{ name: 'More' }" />
     </template>
-    <template #right>
-      <Button
-        v-if="!isBulkDeleteMode"
-        v-show="drafts.data?.length"
-        variant="ghost"
-        size="md"
-        @click="isBulkDeleteMode = true"
-      >
-        Select
-      </Button>
-      <Button
-        v-else
-        variant="subtle"
-        theme="red"
-        size="md"
-        :disabled="selectedDrafts.length === 0"
-        @click="showDeleteConfirm = true"
-      >
-        Delete{{ selectedDrafts.length ? ` ${selectedDrafts.length}` : '' }}
-      </Button>
+    <template #suffix>
+      <div class="flex items-center gap-2">
+        <template v-if="!isBulkDeleteMode">
+          <DropdownMoreOptions
+            v-if="drafts.data?.length"
+            label="Draft actions"
+            button-size="md"
+            align="end"
+            :options="draftActions"
+          />
+          <Button
+            v-if="!readOnlyMode"
+            variant="subtle"
+            size="md"
+            icon="lucide-plus"
+            label="New discussion"
+            @click="showNewDiscussionDialog = true"
+          />
+        </template>
+        <Button
+          v-else
+          variant="subtle"
+          theme="red"
+          size="md"
+          :disabled="selectedDrafts.length === 0"
+          @click="showDeleteConfirm = true"
+        >
+          Delete{{ selectedDrafts.length ? ` ${selectedDrafts.length}` : '' }}
+        </Button>
+      </div>
     </template>
   </PageHeaderMobile>
   <PageHeader class="hidden sm:flex">
     <Breadcrumbs class="h-7" :items="[{ label: 'Drafts', route: { name: 'Drafts' } }]" />
     <div class="flex items-center gap-2">
       <template v-if="!isBulkDeleteMode">
+        <DropdownMoreOptions
+          v-if="drafts.data?.length"
+          label="Draft actions"
+          align="end"
+          :options="draftActions"
+        />
         <Button
-          v-show="drafts.data?.length"
-          variant="ghost"
-          icon-left="lucide-square-check"
-          @click="isBulkDeleteMode = true"
+          v-if="!readOnlyMode"
+          variant="subtle"
+          icon-left="lucide-plus"
+          @click="showNewDiscussionDialog = true"
         >
-          Select
+          New discussion
         </Button>
       </template>
       <template v-else>
@@ -70,7 +86,7 @@
           <ListRow
             v-for="draft in drafts.data"
             :key="draft.name"
-            :to="draftRoute(draft)"
+            :route="draftRoute(draft)"
             :value="draft.name"
             class="h-15"
           >
@@ -88,6 +104,14 @@
                   >
                     {{ draft.title }}
                   </span>
+                  <Tooltip
+                    v-if="draft.scheduled_at"
+                    :text="`Scheduled for ${dayjsLocal(draft.scheduled_at).format(
+                      'ddd D MMM, h:mm A',
+                    )}`"
+                  >
+                    <span class="lucide-calendar-clock size-4 shrink-0 text-ink-gray-5" />
+                  </Tooltip>
                 </div>
                 <div class="flex mt-1.5 items-center min-w-0">
                   <div
@@ -134,6 +158,8 @@
     ]"
     v-model:open="showDeleteConfirm"
   />
+
+  <NewDiscussionSpaceDialog v-model="showNewDiscussionDialog" />
 </template>
 <script setup lang="ts">
 import {
@@ -149,30 +175,16 @@ import {
   toast,
 } from 'frappe-ui'
 import { List, ListRow, ListCell } from 'frappe-ui/list'
+import EmptyStateBox from '@/components/EmptyStateBox.vue'
 import UserAvatarWithHover from '@/components/UserAvatarWithHover.vue'
+import DropdownMoreOptions from '@/components/DropdownMoreOptions.vue'
+import NewDiscussionSpaceDialog from '@/components/NewDiscussionSpaceDialog.vue'
+import { readOnlyMode } from '@/data/readOnlyMode'
 import { relativeTimestamp } from '@/utils'
 import { onMounted, ref } from 'vue'
 import type { RouteLocationRaw } from 'vue-router'
 import { recoverOrphanedDrafts } from '@/data/useDraftSync'
-import { session } from '@/data/session'
-
-/** A row from `get_my_drafts` — a new-discussion draft or a new-comment draft on a
- *  discussion, already resolved to everything needed to render and route it. */
-interface DraftRow {
-  name: string
-  kind: 'discussion' | 'comment'
-  owner: string
-  title: string | null
-  content: string | null
-  modified: string
-  creation: string
-  space: string | null
-  space_title: string | null
-  community: string | null
-  is_private: boolean | number
-  /** For comment drafts, the parent discussion to open; null for discussion drafts. */
-  discussion: string | null
-}
+import { drafts, type DraftRow } from '@/data/drafts'
 
 interface DeleteDraftsResponse {
   deleted: string[]
@@ -185,6 +197,15 @@ interface DeleteDraftsResponse {
 const isBulkDeleteMode = ref(false)
 const selectedDrafts = ref<string[]>([])
 const showDeleteConfirm = ref(false)
+const showNewDiscussionDialog = ref(false)
+
+const draftActions = [
+  {
+    label: 'Select drafts',
+    icon: 'lucide-square-check',
+    onClick: () => (isBulkDeleteMode.value = true),
+  },
+]
 
 // Comment drafts always open their parent discussion with the reply composer focused
 // (?draft=comment) — never the new-discussion composer, which would resurface a saved reply
@@ -242,6 +263,10 @@ function deleteDrafts() {
       let deletedCount = response?.success_count || 0
       let failedCount = response?.failure_count || 0
 
+      // bulk_delete is a custom method, so the doctype APIs never saw these deletes —
+      // drop the rows the list is still holding.
+      response?.deleted.forEach((name) => drafts.removeRow(name))
+
       if (deletedCount > 0) {
         toast.success(deletedCount === 1 ? 'Draft deleted' : `${deletedCount} drafts deleted`)
       }
@@ -253,12 +278,10 @@ function deleteDrafts() {
             ? '1 draft could not be deleted'
             : `${failedCount} drafts could not be deleted`,
         )
-        drafts.reload()
         showDeleteConfirm.value = false
         return
       }
 
-      drafts.reload()
       selectedDrafts.value = []
       showDeleteConfirm.value = false
       isBulkDeleteMode.value = false
@@ -269,23 +292,11 @@ function deleteDrafts() {
     })
 }
 
-// One enriched, route-ready feed of the user's new drafts — discussions and comment
-// replies alike. The backend resolves comment drafts' parent discussion + space, which
-// the bare GP Draft row can't express, so the client just renders and routes.
-let drafts = useCall<DraftRow[]>({
-  url: '/api/v2/method/gameplan.gameplan.doctype.gp_draft.gp_draft.get_my_drafts',
-  method: 'POST',
-  // get_my_drafts is owner-scoped on the server; scope the client cache to the session user
-  // too, so a same-tab account switch can't briefly show the previous user's draft rows.
-  cacheKey: ['drafts', session.user],
-  immediate: true,
-})
-
 // Drafts whose server row never got created (a push that never landed) live only in
-// IndexedDB and would otherwise never show here. Adopt them on open, then refresh.
-onMounted(async () => {
-  const recovered = await recoverOrphanedDrafts()
-  if (recovered > 0) drafts.reload()
+// IndexedDB and would otherwise never show here. Adopting one inserts it through the list,
+// which is what puts it on screen.
+onMounted(() => {
+  recoverOrphanedDrafts()
 })
 
 function contentPreview(content?: string | null) {

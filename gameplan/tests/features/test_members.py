@@ -1,18 +1,19 @@
 # Copyright (c) 2026, Frappe Technologies Pvt Ltd and Contributors
 # See license.txt
 
-"""Authorization tests for the user-management endpoints in gameplan.api and
-gameplan's GP User Profile doctype.
+"""Authorization tests for the user-management endpoints in gameplan.api.
 
 These guard the privilege-escalation / account-takeover holes where any
 authenticated Gameplan user (incl. a Guest) could change roles, disable
 accounts, or send invites. The contract: only admins may call them.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from gameplan.api import get_user_info, invite_by_email
+from gameplan.api import change_user_role, disable_user, get_user_info, invite_by_email
 from gameplan.tests.fixtures import (
 	create_community,
 	create_guest,
@@ -36,9 +37,8 @@ class TestMemberManagement(FrappeTestCase):
 		victim = create_member("sec_victim@example.com")
 
 		frappe.set_user(member.name)
-		victim_profile = frappe.get_doc("GP User Profile", {"user": victim.name})
 		with self.assertRaises(frappe.PermissionError):
-			victim_profile.change_user_role(role="Gameplan Admin")
+			change_user_role(victim.name, role="Gameplan Admin")
 
 	def test_admin_can_change_user_role(self):
 		"""An admin retains the ability to change roles."""
@@ -46,10 +46,19 @@ class TestMemberManagement(FrappeTestCase):
 		target = create_member("sec_target@example.com")
 
 		frappe.set_user(admin.name)
-		target_profile = frappe.get_doc("GP User Profile", {"user": target.name})
-		target_profile.change_user_role(role="Gameplan Admin")
+		change_user_role(target.name, role="Gameplan Admin")
 
 		self.assertIn("Gameplan Admin", frappe.get_roles(target.name))
+
+	def test_change_user_role_rejects_a_non_gameplan_role(self):
+		admin = create_user("sec_bad_role_admin@example.com", "Admin", "Gameplan Admin")
+		target = create_member("sec_bad_role_target@example.com")
+
+		frappe.set_user(admin.name)
+		with self.assertRaises(frappe.ValidationError):
+			change_user_role(target.name, role="System Manager")
+
+		self.assertNotIn("System Manager", frappe.get_roles(target.name))
 
 	def test_changing_role_removes_all_previous_gameplan_roles(self):
 		admin = create_user("sec_multi_role_admin@example.com", "Admin", "Gameplan Admin")
@@ -57,8 +66,7 @@ class TestMemberManagement(FrappeTestCase):
 		target.add_roles("Gameplan Guest")
 
 		frappe.set_user(admin.name)
-		target_profile = frappe.get_doc("GP User Profile", {"user": target.name})
-		user_info = target_profile.change_user_role(role="Gameplan Admin")
+		user_info = change_user_role(target.name, role="Gameplan Admin")
 
 		gameplan_roles = [role for role in frappe.get_roles(target.name) if role.startswith("Gameplan ")]
 		self.assertEqual(gameplan_roles, ["Gameplan Admin"])
@@ -70,12 +78,23 @@ class TestMemberManagement(FrappeTestCase):
 		victim = create_member("sec_victim2@example.com")
 
 		frappe.set_user(member.name)
-		victim_profile = frappe.get_doc("GP User Profile", {"user": victim.name})
 		with self.assertRaises(frappe.PermissionError):
-			victim_profile.disable_user()
+			disable_user(victim.name)
 
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("User", victim.name, "enabled"), 1)
+
+	def test_admin_can_disable_user(self):
+		admin = create_user("sec_disable_admin@example.com", "Admin", "Gameplan Admin")
+		target = create_member("sec_disable_target@example.com")
+
+		frappe.set_user(admin.name)
+		self.assertEqual(disable_user(target.name), target.name)
+
+		# Assert on User: on Frappe v16 the profile re-fetches `user.enabled` from a value
+		# cache that is stale until the transaction ends.
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("User", target.name, "enabled"), 0)
 
 	def test_member_cannot_invite_by_email(self):
 		"""A Member must not be able to send invites (esp. with an Admin role)."""
@@ -108,10 +127,23 @@ class TestMemberManagement(FrappeTestCase):
 		project.save(ignore_permissions=True)
 
 		frappe.set_user(member.name)
-		project.invite_guest("invited_guest@example.com")
+		# GP Invitation.after_insert emails the invitee, so without this the assertion
+		# under test would hinge on the site having an outgoing Email Account (CI mutes
+		# mail via site config; a plain dev site raises OutgoingEmailError). Same mute as
+		# InvitationTestCase in test_invitations.py.
+		with patch("frappe.sendmail"):
+			project.invite_guest("invited_guest@example.com")
 
 		frappe.set_user("Administrator")
-		self.assertTrue(frappe.db.exists("GP Invitation", {"email": "invited_guest@example.com"}))
+		invitation = frappe.db.get_value(
+			"GP Invitation",
+			{"email": "invited_guest@example.com"},
+			["role", "projects"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(invitation)
+		self.assertEqual(invitation.role, "Gameplan Guest")
+		self.assertEqual(frappe.parse_json(invitation.projects), [project.name])
 
 	def test_get_user_info_hides_email_from_guest(self):
 		"""A Guest caller must not receive other members' email addresses."""

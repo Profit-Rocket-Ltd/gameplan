@@ -4,7 +4,7 @@
       <div class="flex justify-center">
         <div class="flex flex-col items-center">
           <GameplanLogo class="mb-3 size-12" />
-          <h3 class="text-3xl-semibold text-ink-gray-9">Gameplan</h3>
+          <h3 class="text-2xl-semibold text-ink-gray-9">Gameplan</h3>
           <div class="flex items-center mt-1">
             <div class="text-base text-ink-gray-6">
               {{ appVersion.branch != 'main' ? appVersion.branch : '' }}
@@ -12,10 +12,7 @@
               <template v-else>{{ appVersion.tag }}</template>
             </div>
 
-            <Tooltip
-              :text="`${appVersion.commit_message} - ${appVersion.commit_date}`"
-              placement="top"
-            >
+            <Tooltip :text="`${appVersion.commit_message} - ${appVersion.commit_date}`" side="top">
               <span class="lucide-info size-3.5 text-ink-gray-8 ml-1" />
             </Tooltip>
           </div>
@@ -26,11 +23,12 @@
         <a
           v-for="link in links"
           :key="link.label"
-          class="flex py-2 px-2 hover:bg-surface-gray-1 rounded cursor-pointer"
+          class="flex py-2 px-2 hover:bg-surface-gray-1 rounded-4 cursor-pointer"
           target="_blank"
           :href="link.url"
         >
-          <span v-if="link.icon" :class="[link.icon, 'size-4 mr-2 text-ink-gray-7']" />
+          <GithubLogo v-if="link.icon === 'github'" class="size-4 mr-2 text-ink-gray-7" />
+          <span v-else-if="link.icon" :class="[link.icon, 'size-4 mr-2 text-ink-gray-7']" />
           <span class="text-base text-ink-gray-8">
             {{ link.label }}
           </span>
@@ -46,6 +44,7 @@
 <script setup lang="ts">
 import { Tooltip } from 'frappe-ui'
 import GameplanLogo from './GameplanLogo.vue'
+import GithubLogo from './GithubLogo.vue'
 let show = defineModel<boolean>()
 
 let links = [
@@ -57,7 +56,7 @@ let links = [
   {
     label: 'GitHub Repository',
     url: 'https://github.com/frappe/gameplan',
-    icon: 'lucide-github',
+    icon: 'github',
   },
   {
     label: 'Report an Issue',

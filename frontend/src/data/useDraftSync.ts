@@ -12,9 +12,21 @@
  *  - Standalone (new discussion): each composition is its own row. Two tabs must NOT collide,
  *    so the local key is per-instance until the server assigns a unique name.
  */
-import { ref, computed, watch, toValue, nextTick, onScopeDispose, type MaybeRefOrGetter } from 'vue'
-import { call, debounce, toast, dayjsLocal } from 'frappe-ui'
+import {
+  ref,
+  computed,
+  watch,
+  toRaw,
+  toValue,
+  nextTick,
+  onScopeDispose,
+  type MaybeRefOrGetter,
+} from 'vue'
+import { call, debounce, toast, dayjsLocal, useDoctype } from 'frappe-ui'
 import { session } from './session'
+import { createDraft, drafts } from './drafts'
+import { isEditorContentEmpty } from '@/utils'
+import { captureError } from '@/utils/errorReporting'
 import {
   getDraftRecord,
   putDraftRecord,
@@ -32,6 +44,21 @@ export type { DraftIdentity, DraftPayload } from './draftStore'
 
 const FIND_DRAFT = 'gameplan.gameplan.doctype.gp_draft.gp_draft.find_my_draft'
 const COMMIT_DRAFT = 'gameplan.gameplan.doctype.gp_draft.gp_draft.commit_draft'
+
+/**
+ * How long a composer waits for its stored copies before it opens blank.
+ *
+ * A lookup that REJECTS is caught and falls back. A lookup that never settles is not:
+ * `fetch` has no timeout of its own, and an IndexedDB request blocked by another tab's
+ * version change fires neither handler. `data` would stay null forever, and a composer
+ * gated on it would sit inert with no way to write or post a comment at all.
+ */
+const RESOLVE_TIMEOUT_MS = 8000
+
+/** Resolves to null after `ms`. Raced against a lookup to bound how long it can hang. */
+function timeout(ms: number): Promise<null> {
+  return new Promise((resolve) => setTimeout(() => resolve(null), ms))
+}
 
 export interface UseDraftSyncOptions {
   /** What this draft is for. May be reactive. */
@@ -53,9 +80,140 @@ export interface UseDraftSyncOptions {
 }
 
 function hasContent(payload: DraftPayload): boolean {
-  const body = (payload.content ?? '').trim()
-  const title = (payload.title ?? '').trim()
-  return (body.length > 0 && body !== '<p></p>') || title.length > 0
+  return !isEditorContentEmpty(payload.content) || (payload.title ?? '').trim().length > 0
+}
+
+/** The `GP Draft` fields this module reads off a fetched row. */
+interface ServerDraftDoc {
+  modified?: string
+  name: string
+  owner?: string
+  content?: string
+  title?: string
+  project?: string | null
+}
+
+/** Where a draft starts from once its stored copies have been looked up and compared. */
+export interface ResolvedDraft {
+  payload: DraftPayload
+  /** The `GP Draft` row these edits belong to, or null when no row exists yet. */
+  serverName: string | null
+  /** Who the draft belongs to, or null while unknown. Unknown, or anyone but the session
+   *  user, makes it read-only. */
+  owner: string | null
+  /** The IndexedDB key the winning record came from, so a re-key can delete its predecessor. */
+  localKey: string | null
+  updatedAt: number
+  syncedAt: number | null
+  /** A stored draft with content was found, rather than a blank start. */
+  restored: boolean
+  /** The winning copy is not in IndexedDB yet and has to be written there. */
+  needsLocalWrite: boolean
+}
+
+/**
+ * Decide where a composer starts: the local copy, the server row, or a blank seed.
+ *
+ * Pure, so the precedence rules are readable and checkable on their own. The rules:
+ *
+ *  - A local record that belongs to someone else does not exist. The IndexedDB store is
+ *    origin-wide, so on a shared browser profile a record under this deterministic key may
+ *    have been written by a previously logged-in user. Restoring it would surface their
+ *    draft and sync our edits onto their server row. Records written before the `user`
+ *    field existed are indistinguishable from another account's, so they go too. One that
+ *    reached the server still comes back through `server`.
+ *  - Un-pushed local edits beat the server copy: they are newer by definition.
+ *  - A draft is readable by anyone holding its name (a shared `?draft=` URL), but only its
+ *    owner can write it. A foreign server draft wins over everything else and opens
+ *    read-only: the reader never gets a buffer of their own to save.
+ *  - A named draft that neither copy vouches for has an unknown owner, so it stays
+ *    read-only. Assuming the reader owns it would let them type into someone else's row.
+ */
+export function reconcileDraft(input: {
+  local: DraftRecord | null
+  server: ServerDraftDoc | null
+  seed: DraftPayload
+  /** Null while the session is still resolving; every stored copy is then foreign. */
+  sessionUser: string | null
+  serverName: string | null
+}): ResolvedDraft {
+  const { server, seed, sessionUser } = input
+  const local = input.local?.user === sessionUser ? input.local : null
+  const base = {
+    owner: sessionUser,
+    localKey: null,
+    restored: false,
+    needsLocalWrite: false,
+  }
+
+  if (server?.owner && server.owner !== sessionUser) {
+    const payload = payloadFromDoc(server, seed)
+    return {
+      ...base,
+      payload,
+      serverName: server.name,
+      owner: server.owner,
+      updatedAt: 0,
+      syncedAt: null,
+      restored: hasContent(payload),
+    }
+  }
+
+  if (local && local.updatedAt > (local.syncedAt ?? 0)) {
+    return {
+      ...base,
+      payload: local.payload,
+      serverName: local.serverName ?? server?.name ?? input.serverName,
+      localKey: local.key,
+      updatedAt: local.updatedAt,
+      syncedAt: local.syncedAt,
+      restored: hasContent(local.payload),
+    }
+  }
+
+  if (server) {
+    const payload = payloadFromDoc(server, seed)
+    const now = Date.now()
+    return {
+      ...base,
+      payload,
+      serverName: server.name,
+      updatedAt: now,
+      syncedAt: now,
+      restored: hasContent(payload),
+      needsLocalWrite: true,
+    }
+  }
+
+  if (local) {
+    return {
+      ...base,
+      payload: local.payload,
+      serverName: local.serverName ?? null,
+      localKey: local.key,
+      updatedAt: local.updatedAt,
+      syncedAt: local.syncedAt,
+      restored: hasContent(local.payload),
+    }
+  }
+
+  return {
+    ...base,
+    payload: seed,
+    serverName: input.serverName,
+    owner: input.serverName ? null : sessionUser,
+    updatedAt: 0,
+    syncedAt: null,
+  }
+}
+
+/** Read a server row into a payload shaped like the composer's own: a composer with no
+ *  title field must not grow one, or it would push an empty title over a real one. */
+function payloadFromDoc(doc: ServerDraftDoc, seed: DraftPayload): DraftPayload {
+  const payload: DraftPayload = { content: doc.content ?? '' }
+  if ('title' in seed) payload.title = doc.title ?? ''
+  if ('project' in seed) payload.project = doc.project ?? null
+  return payload
 }
 
 let instanceCounter = 0
@@ -63,14 +221,26 @@ let instanceCounter = 0
 export function useDraftSync(options: UseDraftSyncOptions) {
   const { identity, debounceMs = 500, canSave = hasContent, initialPayload, onCreate } = options
 
-  const data = ref<DraftPayload>(initialPayload ? initialPayload() : { content: '' })
-  const ready = ref(false)
-  const loading = ref(false)
+  // Per instance, not module-level: these hold the in-flight request, and two composers
+  // writing different drafts at once would share one URL and one response.
+  const draftDoc = useDoctype('GP Draft')
+
+  /**
+   * The composer's buffer, or null until the draft has been resolved.
+   *
+   * Null rather than a seeded payload on purpose. There is nothing to type into before the
+   * stored copies have been looked up, so an edit made in that window cannot exist and
+   * cannot be overwritten when the lookup lands. Callers get the same guarantee from the
+   * type: an editor bound to `data.content` does not compile until they have handled the
+   * null, which is the check every composer has to make anyway.
+   */
+  const data = ref<DraftPayload | null>(null)
   const saving = ref(false)
-  const savedAt = ref<number | null>(null)
   const restored = ref(false)
-  // Tracks whether the last server push failed, so we toast once per streak (not per keystroke).
-  const pushFailed = ref(false)
+  // The error from the most recent failed push, cleared by the next success. Doubles as the
+  // "are we in a failure streak" flag (so we toast once, not per keystroke) and as the reason
+  // a caller like publish() can report when the draft is still unsynced.
+  const lastError = ref<unknown>(null)
   const serverName = ref<string | null>(toValue(options.draftName ?? null))
 
   // Last local edit vs last successful push, on THIS device. Drives reconciliation
@@ -87,6 +257,11 @@ export function useDraftSync(options: UseDraftSyncOptions) {
   // write so a same-browser account switch can't relabel this composer's draft as the new
   // user (the global session.user can change while this instance is still alive).
   const draftOwner = session.user
+  // Who the open draft belongs to, or null while unknown. A new composition is ours from
+  // the start; a draft opened by name is not known to be ours until the lookup says so.
+  // Until then, and for anyone else's shared draft, it is read-only: nothing may save it.
+  const owner = ref<string | null>(serverName.value ? null : draftOwner)
+  const readOnly = computed(() => owner.value === null || owner.value !== draftOwner)
   const isSingleton = computed(() => {
     const id = toValue(identity)
     return id.mode === 'Edit' || Boolean(id.referenceName)
@@ -100,23 +275,19 @@ export function useDraftSync(options: UseDraftSyncOptions) {
   })
 
   const isEnabled = () => toValue(options.enabled ?? true)
-  const isLoading = computed(() => isEnabled() && !ready.value)
+  const isLoading = computed(() => isEnabled() && data.value === null)
 
-  // Suppress the change-watcher while we apply a restored/loaded payload.
+  const seed = (): DraftPayload => (initialPayload ? initialPayload() : { content: '' })
+
+  // Suppress the change-watcher while we write a payload the user did not type: a sibling
+  // tab's copy, or the blank buffer left behind by a finished draft.
   const applying = ref(false)
-  function applyPayload(payload: Partial<DraftPayload>) {
+  function applyPayload(payload: DraftPayload) {
     applying.value = true
-    data.value = { ...data.value, ...payload }
+    data.value = payload
     nextTick(() => {
       applying.value = false
     })
-  }
-
-  function payloadFromDoc(doc: Record<string, any>): DraftPayload {
-    const payload: DraftPayload = { content: doc.content ?? '' }
-    if ('title' in data.value) payload.title = doc.title ?? ''
-    if ('project' in data.value) payload.project = doc.project ?? null
-    return payload
   }
 
   function identityFields() {
@@ -129,15 +300,16 @@ export function useDraftSync(options: UseDraftSyncOptions) {
     return fields
   }
 
-  function payloadFields() {
-    const fields: Record<string, unknown> = { content: data.value.content ?? '' }
-    if (data.value.title !== undefined) fields.title = data.value.title ?? ''
-    if (data.value.project !== undefined) fields.project = data.value.project || null
+  function payloadFields(payload: DraftPayload) {
+    const fields: Record<string, unknown> = { content: payload.content ?? '' }
+    if (payload.title !== undefined) fields.title = payload.title ?? ''
+    if (payload.project !== undefined) fields.project = payload.project || null
     return fields
   }
 
   let previousKey: string | null = null
   async function persistLocal() {
+    if (!data.value) return
     const record: DraftRecord = {
       key: key.value,
       identity: toValue(identity),
@@ -158,56 +330,77 @@ export function useDraftSync(options: UseDraftSyncOptions) {
   let activePush: Promise<void> | null = null
 
   async function persistToServer() {
-    if (!isEnabled() || !dirty.value || !canSave(data.value)) return
+    const payload = data.value
+    if (!payload || readOnly.value || !isEnabled() || !dirty.value || !canSave(payload)) return
+    // Snapshot what we are about to send, and the edit clock it belongs to, BEFORE the
+    // request goes out. Marking the draft synced as of the response time would mark every
+    // keystroke typed while the request was in flight as already pushed — those edits go
+    // permanently un-synced, and publishing (which builds the discussion from the server
+    // row, not the local buffer) then produces a post with an empty body.
+    const pushedAt = updatedAt.value
+    const fields = payloadFields(payload)
     saving.value = true
     try {
       if (serverName.value) {
-        await call('frappe.client.set_value', {
-          doctype: 'GP Draft',
-          name: serverName.value,
-          fieldname: payloadFields(),
-        })
+        // setValue writes through the doctype, so the drafts list picks up the new
+        // title/content on its own — no refetch.
+        const updated = await draftDoc.setValue.submit({ name: serverName.value, ...fields })
+        if (!updated) throw new Error('Could not save the draft')
       } else {
-        const doc = await call('frappe.client.insert', {
-          doc: { doctype: 'GP Draft', ...identityFields(), ...payloadFields() },
-        })
+        const doc = await createDraft({ ...identityFields(), ...fields })
         serverName.value = doc.name
         onCreate?.(doc.name)
       }
-      syncedAt.value = Date.now()
-      savedAt.value = syncedAt.value
+      syncedAt.value = Math.max(syncedAt.value ?? 0, pushedAt)
       await persistLocal()
-      pushFailed.value = false
+      lastError.value = null
     } catch (error) {
       // Keep the local copy; the next edit (or unmount flush) retries. Standalone
       // new-discussion drafts that never land here are adopted later by
       // recoverOrphanedDrafts(), so a missed push no longer strands a draft locally.
-      console.error('Draft sync failed', error)
+      captureError(error, { action: 'draft-push', draft: serverName.value })
       // Tell the user once per failure streak so a silently-failing save can't quietly
       // lose server-side persistence. Reset on the next success above.
-      if (!pushFailed.value) {
-        pushFailed.value = true
+      if (!lastError.value) {
         toast.error('Could not save your draft to the server — keeping a local copy and retrying.')
       }
+      lastError.value = error
     } finally {
       saving.value = false
     }
   }
 
-  function pushToServer() {
-    if (activePush) return activePush
-    activePush = persistToServer().finally(() => {
-      activePush = null
+  // Chain behind an in-flight push rather than joining it: that request was built from an
+  // older snapshot, so returning its promise would report edits made since as pushed. The
+  // chained run is free when nothing changed — persistToServer() bails on `!dirty`.
+  function pushToServer(): Promise<void> {
+    const next = (activePush ?? Promise.resolve()).then(persistToServer)
+    const push = next.finally(() => {
+      if (activePush === push) activePush = null
     })
-    return activePush
+    activePush = push
+    return push
   }
 
   const debouncedPush = debounce(pushToServer, debounceMs)
 
+  /**
+   * Latches on the first edit the person makes, and never clears.
+   *
+   * Comparing the buffer against the content it started with cannot stand in for this:
+   * typing and then deleting it again leaves a buffer identical to the blank one, which
+   * is indistinguishable from never having typed at all. Only the late-adopt path below
+   * reads it, and only to decline.
+   */
+  const touched = ref(false)
+
   watch(
-    () => [data.value.title, data.value.content, data.value.project],
+    () => [data.value?.title, data.value?.content, data.value?.project],
     () => {
-      if (!ready.value || applying.value || !isEnabled()) return
+      // A read-only draft still changes under the editor, which normalizes some content
+      // (images, code blocks) on first render. That is not an edit to save.
+      if (!data.value || applying.value || readOnly.value || !isEnabled()) return
+      touched.value = true
       updatedAt.value = Date.now()
       if (!canSave(data.value)) return
       void persistLocal()
@@ -215,14 +408,20 @@ export function useDraftSync(options: UseDraftSyncOptions) {
     },
   )
 
-  async function fetchServerDraft(): Promise<Record<string, any> | null> {
+  async function fetchServerDraft(): Promise<ServerDraftDoc | null> {
     try {
       if (serverName.value) {
-        return await call('frappe.client.get', { doctype: 'GP Draft', name: serverName.value })
+        try {
+          return await call('frappe.client.get', { doctype: 'GP Draft', name: serverName.value })
+        } catch (error) {
+          // Without the row its owner is unknown, so the draft stays read-only. Say why.
+          toast.error('Could not load this draft. Reload the page to try again.')
+          throw error
+        }
       }
       if (isSingleton.value) {
         const id = toValue(identity)
-        return await call(FIND_DRAFT, {
+        return await call<ServerDraftDoc | null>(FIND_DRAFT, {
           type: id.type,
           mode: id.mode,
           reference_doctype: id.referenceDoctype,
@@ -230,65 +429,99 @@ export function useDraftSync(options: UseDraftSyncOptions) {
         })
       }
     } catch (error) {
-      console.error('Draft lookup failed', error)
+      // The composer stays usable on a failed lookup, so this is invisible without a report.
+      captureError(error, { action: 'draft-load', draft: serverName.value })
     }
     return null
   }
 
-  async function load() {
-    if (ready.value || loading.value) return
-    loading.value = true
+  /** Read both stored copies and reconcile them into a starting point. Never rejects. */
+  async function lookupDraft(): Promise<ResolvedDraft> {
     try {
-      // The IndexedDB store is origin-wide, so on a shared browser profile a record under this
-      // deterministic key may belong to a previously logged-in user. Only restore a record we
-      // can confirm is the current user's — restoring anyone else's (including legacy records
-      // with no `user`, which are indistinguishable from another account's) would surface their
-      // draft content and sync our edits against their server row. A never-synced legacy draft
-      // is dropped here; one that reached the server still loads via fetchServerDraft below.
-      const localRaw = await getDraftRecord(key.value)
-      const local = localRaw?.user === session.user ? localRaw : null
-      const server = await fetchServerDraft()
-      // A draft is readable by anyone with its name (e.g. a shared `?draft=` URL), but only its
-      // owner can write it. If we loaded someone else's draft, restore its content but don't bind
-      // our edits to their server row — that write is forbidden and would retry-toast forever.
-      // Forking (serverName = null) lets the reader's edits insert their own draft instead.
-      const serverIsForeign = Boolean(server?.owner && server.owner !== session.user)
-
-      if (local && local.updatedAt > (local.syncedAt ?? 0)) {
-        // Un-pushed local edits take precedence over the server copy.
-        applyPayload(local.payload)
-        serverName.value = local.serverName ?? server?.name ?? serverName.value
-        updatedAt.value = local.updatedAt
-        syncedAt.value = local.syncedAt
-        previousKey = local.key
-        restored.value = hasContent(local.payload)
-      } else if (server) {
-        applyPayload(payloadFromDoc(server))
-        serverName.value = serverIsForeign ? null : server.name
-        syncedAt.value = Date.now()
-        updatedAt.value = syncedAt.value
-        await persistLocal()
-        restored.value = hasContent(payloadFromDoc(server))
-      } else if (local) {
-        applyPayload(local.payload)
-        serverName.value = local.serverName ?? null
-        updatedAt.value = local.updatedAt
-        syncedAt.value = local.syncedAt
-        previousKey = local.key
-        restored.value = hasContent(local.payload)
-      } else if (initialPayload) {
-        applyPayload(initialPayload())
-      }
-    } finally {
-      ready.value = true
-      loading.value = false
+      const [local, server] = await Promise.all([getDraftRecord(key.value), fetchServerDraft()])
+      return reconcileDraft({
+        local: local ?? null,
+        server,
+        seed: seed(),
+        sessionUser: session.user,
+        serverName: serverName.value,
+      })
+    } catch (error) {
+      // A composer that cannot reach its draft still has to open, empty and editable.
+      captureError(error, { action: 'draft-load', draft: serverName.value })
+      return blankStart()
     }
+  }
+
+  /** Where a composer starts when nothing was found, or nothing could be looked up. */
+  function blankStart(): ResolvedDraft {
+    return reconcileDraft({
+      local: null,
+      server: null,
+      seed: seed(),
+      sessionUser: session.user,
+      serverName: serverName.value,
+    })
+  }
+
+  /** Install a resolved draft as the composer's buffer. `quietly` suppresses the change
+   *  watcher, for a buffer the user did not type. */
+  async function adopt(resolved: ResolvedDraft, { quietly = false } = {}) {
+    serverName.value = resolved.serverName
+    owner.value = resolved.owner
+    updatedAt.value = resolved.updatedAt
+    syncedAt.value = resolved.syncedAt
+    restored.value = resolved.restored
+    previousKey = resolved.localKey
+    if (quietly) applyPayload(resolved.payload)
+    else data.value = resolved.payload
+    if (resolved.needsLocalWrite) await persistLocal()
+  }
+
+  /**
+   * Look up the stored copies, reconcile them, and hand the composer its buffer.
+   *
+   * The buffer is created FROM the result rather than written INTO beforehand, so there is
+   * no window in which the lookup and the person typing both own `data`. Runs once; the
+   * in-flight promise is shared so a second caller waits rather than starting a second
+   * lookup — and it is bounded, so a lookup that hangs cannot strand the composer.
+   */
+  let opening: Promise<void> | null = null
+  function open(): Promise<void> {
+    if (data.value) return Promise.resolve()
+    if (opening) return opening
+    opening = (async () => {
+      const pending = lookupDraft()
+      const resolved = await Promise.race([pending, timeout(RESOLVE_TIMEOUT_MS)])
+      if (resolved) {
+        await adopt(resolved)
+        return
+      }
+      // Past the deadline with the lookup still outstanding. Open blank and editable rather
+      // than leave the composer inert, and take the result later if it lands on a buffer
+      // nobody has touched. The blank goes in quietly so opening the composer does not
+      // itself count as an edit; from here `touched` belongs to the person typing.
+      captureError(new Error('Draft lookup timed out'), {
+        action: 'draft-load',
+        draft: serverName.value,
+      })
+      const blank = blankStart()
+      await adopt(blank, { quietly: true })
+      void pending.then((late) => {
+        // Identity as well as `touched`, because a buffer swapped out wholesale — by a
+        // sibling tab, or by a finished draft — is not this one to overwrite either.
+        // `toRaw`, because the ref hands back a reactive proxy, never the object it was given.
+        if (touched.value || toRaw(data.value) !== blank.payload) return
+        return adopt(late, { quietly: true })
+      })
+    })()
+    return opening
   }
 
   watch(
     () => isEnabled(),
     (enabled) => {
-      if (enabled) void load()
+      if (enabled) void open()
     },
     { immediate: true },
   )
@@ -296,9 +529,9 @@ export function useDraftSync(options: UseDraftSyncOptions) {
   // Keep sibling tabs of the same draft coherent — but never clobber un-pushed edits
   // typed in this tab.
   const unsubscribe = onDraftChange(async (changedKey) => {
-    if (changedKey !== key.value || dirty.value || !ready.value) return
+    if (changedKey !== key.value || dirty.value || !data.value) return
     const record = await getDraftRecord(key.value)
-    // Same owner guard as load(): on a shared browser another account's tab can write this
+    // Same owner guard as reconcileDraft: on a shared browser another account's tab can write
     // deterministic key, and we must not pull their content into this editor.
     if (record && record.user === session.user) {
       applyPayload(record.payload)
@@ -311,12 +544,12 @@ export function useDraftSync(options: UseDraftSyncOptions) {
   function reset() {
     debouncedPush.cancel?.()
     serverName.value = null
+    owner.value = draftOwner
     updatedAt.value = 0
     syncedAt.value = null
-    savedAt.value = null
     restored.value = false
     previousKey = null
-    applyPayload(initialPayload ? initialPayload() : { content: '' })
+    applyPayload(seed())
   }
 
   /** Drop the local copy and reset, leaving the server untouched. Use after a finalize
@@ -328,8 +561,11 @@ export function useDraftSync(options: UseDraftSyncOptions) {
     broadcastDraftChange(localKey)
   }
 
-  /** Force any pending change to the server now (creating the row if needed). */
+  /** Force any pending change to the server now (creating the row if needed). Chains behind
+   *  an in-flight push, so on return the server row reflects the local buffer — unless
+   *  `dirty` is still true, which means the push failed. */
   async function flush() {
+    await open()
     debouncedPush.cancel?.()
     await pushToServer()
     return serverName.value
@@ -343,7 +579,10 @@ export function useDraftSync(options: UseDraftSyncOptions) {
     await forget()
     if (name) {
       try {
-        await call('frappe.client.delete', { doctype: 'GP Draft', name })
+        // Deleting through the doctype drops the row from every GP Draft list, so the
+        // drafts page and the rail count follow without a refetch.
+        const deleted = await draftDoc.delete.submit({ name })
+        if (!deleted) throw new Error('Could not delete the draft')
       } catch (error) {
         console.error('Failed to delete draft', error)
       }
@@ -368,13 +607,17 @@ export function useDraftSync(options: UseDraftSyncOptions) {
           reference_doctype: id.referenceDoctype,
           reference_name: id.referenceName,
         })
+        // commit_draft deletes the row server-side, so drop it from the list here — the
+        // doctype APIs never saw the write.
+        drafts.removeRow(name)
       } catch (error) {
         console.error('Failed to commit draft', error)
       }
     } else if (name) {
       // No target to migrate into (shouldn't happen for singletons) — just delete.
       try {
-        await call('frappe.client.delete', { doctype: 'GP Draft', name })
+        const deleted = await draftDoc.delete.submit({ name })
+        if (!deleted) throw new Error('Could not delete the draft')
       } catch (error) {
         console.error('Failed to delete draft', error)
       }
@@ -384,20 +627,23 @@ export function useDraftSync(options: UseDraftSyncOptions) {
   onScopeDispose(() => {
     unsubscribe()
     // Best-effort: push un-synced edits as we leave so nothing is lost on navigation.
-    if (dirty.value && canSave(data.value)) void pushToServer()
+    if (dirty.value && data.value && canSave(data.value)) void pushToServer()
   })
 
   return {
+    /** The composer's buffer, or null until the draft has been resolved. */
     data,
-    ready,
     isLoading,
-    saving,
-    savedAt,
     /** There are local edits not yet pushed to the server. */
     dirty,
+    /** Why the last push failed, or null if the last one succeeded. */
+    lastError,
     /** A pre-existing draft was found and restored on load. */
     restored,
     serverName,
+    /** Who the draft belongs to, or null while unknown. Unless it is the session user, the
+     *  draft is read-only and never saved. */
+    owner,
     flush,
     clear,
     commit,
@@ -494,8 +740,8 @@ async function recoverOrphanedDraft(record: DraftRecord): Promise<boolean> {
     // recovery may have inserted the row before crashing ahead of the local update. Adopt that
     // existing row instead of inserting a duplicate. Standalone discussions have no such key, so
     // a tiny insert-then-crash window remains (unchanged, pre-existing).
-    let doc = isCommentReply
-      ? await call(FIND_DRAFT, {
+    let doc: ServerDraftDoc | null = isCommentReply
+      ? await call<ServerDraftDoc | null>(FIND_DRAFT, {
           type: id.type,
           mode: id.mode,
           reference_doctype: id.referenceDoctype,
@@ -512,9 +758,7 @@ async function recoverOrphanedDraft(record: DraftRecord): Promise<boolean> {
         fields.reference_name = id.referenceName
       }
 
-      doc = await call('frappe.client.insert', {
-        doc: { doctype: 'GP Draft', type: id.type, mode: id.mode, ...fields },
-      })
+      doc = await createDraft({ type: id.type, mode: id.mode, ...fields })
     } else {
       // A server row already exists for this singleton (created on another tab/device). Only push
       // our local orphan over it when the content differs AND our last local edit is newer than the
@@ -526,11 +770,7 @@ async function recoverOrphanedDraft(record: DraftRecord): Promise<boolean> {
       if (localContent !== serverContent) {
         const localIsNewer = record.updatedAt > dayjsLocal(doc.modified).valueOf()
         if (localIsNewer) {
-          await call('frappe.client.set_value', {
-            doctype: 'GP Draft',
-            name: doc.name,
-            fieldname: { content: localContent },
-          })
+          await useDoctype('GP Draft').setValue.submit({ name: doc.name, content: localContent })
         } else {
           payload = { ...payload, content: serverContent }
         }
@@ -551,7 +791,7 @@ async function recoverOrphanedDraft(record: DraftRecord): Promise<boolean> {
     broadcastDraftChange(newKey)
     return true
   } catch (error) {
-    console.error('Failed to recover orphaned draft', error)
+    captureError(error, { action: 'draft-recovery', draft: record.serverName })
     return false
   }
 }
@@ -565,7 +805,7 @@ async function parentDocResolves(
 ): Promise<boolean> {
   if (!doctype || !name) return false
   try {
-    const res = await call('frappe.client.get_value', {
+    const res = await call<{ name?: string } | null>('frappe.client.get_value', {
       doctype,
       filters: { name },
       fieldname: 'name',

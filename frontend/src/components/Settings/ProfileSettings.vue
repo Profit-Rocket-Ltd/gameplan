@@ -1,9 +1,7 @@
 <template>
-  <SettingsHeader>
-    <h2 class="text-lg-semibold text-ink-gray-8">Profile</h2>
-  </SettingsHeader>
+  <PanelHeader title="Profile" />
 
-  <SettingsBody>
+  <PanelBody>
     <div v-if="profile && user" class="space-y-11 pt-6">
       <section class="space-y-6">
         <div class="flex items-center gap-4">
@@ -41,7 +39,7 @@
         </div>
 
         <div class="grid gap-6 sm:grid-cols-2">
-          <div>
+          <div ref="firstNameField">
             <TextInput
               label="First name"
               class="w-full"
@@ -50,7 +48,7 @@
               @blur="saveName"
             />
           </div>
-          <div>
+          <div ref="lastNameField">
             <TextInput
               label="Last name"
               class="w-full"
@@ -61,7 +59,7 @@
           </div>
         </div>
 
-        <div>
+        <div ref="bioField">
           <Textarea
             label="Bio"
             class="w-full"
@@ -74,28 +72,29 @@
       </section>
 
       <section>
-        <h2 class="text-lg-semibold text-ink-gray-8">Account</h2>
+        <h2 class="text-md-semibold text-ink-gray-8">Account</h2>
 
         <div class="mt-2 divide-y divide-outline-gray-1">
-          <SettingsRow
-            title="Public profile"
-            description="View your public page or customize its card layout"
-          >
+          <SettingsRow title="Public profile" :description="publicProfileDescription">
             <div class="flex gap-2">
               <Button icon-left="lucide-user" @click="goToMyProfile">View</Button>
-              <Button icon-left="lucide-layout-dashboard" @click="goToProfileCustomize">
+              <Button
+                v-if="canCustomizeProfile"
+                icon-left="lucide-layout-dashboard"
+                @click="goToProfileCustomize"
+              >
                 Customize
               </Button>
             </div>
           </SettingsRow>
 
           <SettingsRow title="Password" description="Manage password and account access">
-            <Button link="/update-password">Update Password</Button>
+            <Button href="/update-password">Update Password</Button>
           </SettingsRow>
         </div>
       </section>
     </div>
-  </SettingsBody>
+  </PanelBody>
 
   <Dialog v-model:open="showAvatarEditor" title="Edit avatar" @after-leave="clearAvatarFile">
     <ProfileImageEditor
@@ -111,22 +110,24 @@
 <script setup lang="ts">
 import { computed, ref, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useMediaQuery } from '@vueuse/core'
 import {
   Button,
   Dialog,
   Dropdown,
-  SettingsBody,
-  SettingsHeader,
   SettingsRow,
   Textarea,
   TextInput,
   toast,
   useDoc,
 } from 'frappe-ui'
+import PanelHeader from './PanelHeader.vue'
+import PanelBody from './PanelBody.vue'
 import type { DropdownOptions } from 'frappe-ui'
 import ProfileImageEditor from '@/components/ProfileImageEditor.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useSessionUser } from '@/data/users'
+import { useSyncedField } from '@/utils/useSyncedField'
 import type { GPUserProfile } from '@/types/doctypes'
 
 interface ProfileMethods {
@@ -174,15 +175,43 @@ const profileChildResource = computed(() => ({
   ...profileResource,
   doc: profile.value,
 }))
-const firstName = ref('')
-const lastName = ref('')
-const bio = ref('')
+const firstNameField = useTemplateRef<HTMLElement>('firstNameField')
+const lastNameField = useTemplateRef<HTMLElement>('lastNameField')
+const bioField = useTemplateRef<HTMLElement>('bioField')
+const userNameParts = computed(() => getUserNameParts(user.value))
+// These stay in step with the document until they are focused or typed in. See
+// useSyncedField for the doc store's double publish and why neither "always copy"
+// nor "copy once" is safe.
+const firstName = useSyncedField({
+  source: () => userNameParts.value.first_name,
+  identity: () => user.value?.name,
+  target: firstNameField,
+})
+const lastName = useSyncedField({
+  source: () => userNameParts.value.last_name,
+  identity: () => user.value?.name,
+  target: lastNameField,
+})
+const bio = useSyncedField({
+  source: () => profile.value?.bio,
+  identity: () => profile.value?.name,
+  target: bioField,
+})
 const savingName = computed(() => userResource.setValue.loading)
 const savingBio = computed(() => profileResource.setValue.loading)
 const showAvatarEditor = ref(false)
 const selectedAvatarFile = ref<File | null>(null)
 const avatarFileInput = useTemplateRef<HTMLInputElement>('avatarFileInput')
 const hasAvatar = computed(() => Boolean(profile.value?.image))
+// The customize page puts an editor panel beside the bento canvas, which needs
+// at least `md`. Below that the page refuses to render, so don't offer the entry
+// point or promise layout editing in the copy.
+const canCustomizeProfile = useMediaQuery('(min-width: 768px)')
+const publicProfileDescription = computed(() =>
+  canCustomizeProfile.value
+    ? 'View your public page or customize its card layout'
+    : 'View your public page',
+)
 const avatarOptions = computed<DropdownOptions>(() => [
   {
     label: 'Change image',
@@ -212,24 +241,6 @@ watch(
     if (sessionUser.name) {
       userResource.reload()
     }
-  },
-  { immediate: true },
-)
-
-watch(
-  user,
-  (currentUser) => {
-    let nameParts = getUserNameParts(currentUser)
-    firstName.value = nameParts.first_name
-    lastName.value = nameParts.last_name
-  },
-  { immediate: true },
-)
-
-watch(
-  profile,
-  (currentProfile) => {
-    bio.value = currentProfile?.bio || ''
   },
   { immediate: true },
 )

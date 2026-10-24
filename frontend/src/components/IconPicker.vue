@@ -16,18 +16,18 @@
         @open-auto-focus.prevent
       >
         <div
-          class="max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg bg-surface-elevation-2 text-base shadow-2xl ring-1 ring-black ring-opacity-5"
+          class="max-w-[calc(100vw-2rem)] overflow-hidden rounded-6 bg-surface-elevation-2 text-base shadow-2xl ring-1 ring-black ring-opacity-5"
           style="transform-origin: var(--reka-popover-content-transform-origin)"
         >
           <div class="relative">
-            <div class="max-h-72 overflow-y-auto p-2 pb-5">
+            <ScrollArea viewport-class="max-h-72 p-2 pb-5">
               <div class="grid grid-cols-8 gap-1" role="listbox" aria-label="Space icons">
                 <button
                   v-for="icon in filteredIcons"
                   :key="icon.class"
                   type="button"
                   role="option"
-                  class="flex size-8 items-center justify-center rounded text-ink-gray-7 hover:bg-surface-gray-2"
+                  class="flex size-8 items-center justify-center rounded-4 text-ink-gray-7 hover:bg-surface-gray-2"
                   :class="icon.class === modelValue ? 'bg-surface-gray-3 text-ink-gray-9' : ''"
                   :title="icon.label"
                   :aria-label="icon.label"
@@ -37,7 +37,7 @@
                   <span :class="[icon.class, 'size-5']" />
                 </button>
               </div>
-            </div>
+            </ScrollArea>
             <div
               class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-surface-elevation-2 to-transparent"
             />
@@ -50,6 +50,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ScrollArea } from 'frappe-ui'
 import { PopoverAnchor, PopoverContent, PopoverPortal, PopoverRoot } from 'reka-ui'
 
 type IconOption = {

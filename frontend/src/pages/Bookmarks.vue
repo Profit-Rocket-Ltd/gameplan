@@ -1,7 +1,7 @@
 <template>
   <PageHeaderMobile class="sm:hidden" title="Bookmarks">
-    <template #left>
-      <PageHeaderBackButton :to="{ name: 'More' }" />
+    <template #prefix>
+      <PageHeaderBackButton :fallback-route="{ name: 'More' }" />
     </template>
   </PageHeaderMobile>
   <PageHeader class="hidden sm:flex">

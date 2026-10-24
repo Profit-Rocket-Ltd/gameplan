@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, useTemplateRef } from 'vue'
-import { Button, TooltipProvider } from 'frappe-ui'
+import { Button, ScrollArea, TooltipProvider } from 'frappe-ui'
 import {
   Blockquote,
   Bold,
@@ -16,7 +16,11 @@ import {
   Paragraph,
   Separator,
   Strike,
-  type Editor,
+  // `Editor` in this package is the Vue component; the tiptap instance these
+  // helpers receive is `TiptapEditor`. Importing it from here rather than
+  // @tiptap/core keeps it on the same tiptap copy frappe-ui augments, so its
+  // editor commands are visible.
+  type TiptapEditor as Editor,
   type MenuItem,
 } from 'frappe-ui/editor'
 import EmojiPicker from '@/components/EmojiPicker.vue'
@@ -25,6 +29,7 @@ import GPEditor from './GPEditor.vue'
 import QuoteReplyButton from '@/components/RichQuoteExtension/QuoteReplyButton.vue'
 import { useRichQuotes, useBacklinkRefresh } from '@/components/RichQuoteExtension/useRichQuotes'
 import { commentExtensions } from './commentExtensions'
+import { hasPollBlock } from '@/components/PollBlock/poll-draft'
 
 // gameplan's comment box: the lighter CommentKit (no toc / iframe) + tables +
 // @-mentions + #-tags + RichQuote + slash commands. The shared `gameplanToolbar`
@@ -37,6 +42,13 @@ const props = withDefaults(
     editable?: boolean
     submitButtonProps?: Record<string, any>
     discardButtonProps?: Record<string, any>
+    // Unset on purpose: the editor grows to its content by default, so editing an
+    // existing comment reads like editing a post body instead of a fixed box that
+    // scrolls internally. Only the new-comment composers pass a max-height — they
+    // sit at the bottom of a scrolling list, so an unbounded box would push the
+    // conversation off screen as you type. Don't reinstate a default here: a caller
+    // cannot opt out of one, since withDefaults substitutes it for an explicit
+    // `undefined`.
     maxHeight?: string
     minHeight?: string
     toolbarExpanded?: boolean
@@ -45,8 +57,9 @@ const props = withDefaults(
     quoteSourceId?: string
     // comment owner — stamped on quotes created from this comment's selection
     author?: string
+    canAttachPoll?: boolean
   }>(),
-  { value: '', placeholder: null, editable: true, maxHeight: '50vh', toolbarExpanded: false },
+  { value: '', placeholder: null, editable: true, toolbarExpanded: false },
 )
 
 const emit = defineEmits<{
@@ -105,12 +118,19 @@ const textToolsItem: MenuItem = {
   isActive: () => props.toolbarExpanded,
 }
 
+// Both buttons open a suggestion menu, which can only be done by typing its
+// trigger char. The command owns that char: it takes it back out when the menu
+// is dismissed rather than used, and declines without touching the document
+// where no menu can open at all, such as inside code. It also focuses the
+// editor itself, so these calls need no `.focus()` of their own. Without that
+// focus the click would leave the caret on the button, and the button would
+// swallow the keystrokes meant for the menu.
 function openSlashCommands(editor: Editor) {
-  editor.chain().focus().insertContent(' /').run()
+  editor.commands.openSuggestionMenu('slashCommands')
 }
 
-function insertTrigger(editor: Editor, trigger: '@') {
-  editor.chain().focus().insertContent(` ${trigger}`).run()
+function openMentions(editor: Editor) {
+  editor.commands.openSuggestionMenu('mentionSuggestion')
 }
 
 function insertEmoji(editor: Editor, emoji: string) {
@@ -173,101 +193,110 @@ function canInsertCodeBlock(editor: Editor) {
       <QuoteReplyButton v-if="e" :editor="e" :source-id="quoteSourceId" :author="author ?? ''" />
     </template>
     <template v-if="editable" #bottom="{ editor: e }">
-      <div class="mt-2 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
-        <div class="flex min-w-0 items-center gap-1 overflow-x-auto">
-          <template v-if="toolbarExpanded">
-            <EditorFixedMenu
-              :editor="e"
-              :items="expandedToolbarItems"
-              button-size="sm"
-              class="overflow-x-auto"
-            />
-          </template>
-          <template v-else>
-            <TooltipProvider>
-              <Button
+      <!-- The slot yields null until the editor mounts, and every control here
+      needs one. Same guard as the #top slot above. -->
+      <div v-if="e" class="mt-2 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+        <ScrollArea orientation="horizontal" class="min-w-0">
+          <div class="flex items-center gap-1">
+            <template v-if="toolbarExpanded">
+              <EditorFixedMenu
+                :editor="e"
+                :items="expandedToolbarItems"
                 size="sm"
-                variant="ghost"
-                icon="lucide-plus"
-                label="Insert"
-                tooltip="Insert"
-                @click="openSlashCommands(e)"
+                class="overflow-x-auto"
               />
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="lucide-case-sensitive"
-                label="Text tools"
-                tooltip="Text tools"
-                @click="emit('update:toolbarExpanded', true)"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="lucide-at-sign"
-                label="Mention"
-                tooltip="Mention"
-                @click="insertTrigger(e, '@')"
-              />
-              <EmojiPicker @select="insertEmoji(e, $event)">
-                <template #trigger>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon="lucide-smile"
-                    label="Emoji"
-                    tooltip="Emoji"
-                  />
-                </template>
-              </EmojiPicker>
-              <span class="mx-1 h-5 border-l border-outline-gray-2" aria-hidden="true" />
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="lucide-image"
-                label="Image"
-                tooltip="Image"
-                :disabled="!canInsertImage(e)"
-                @click="insertImage(e)"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="lucide-video"
-                label="Video"
-                tooltip="Video"
-                :disabled="!canInsertVideo(e)"
-                @click="insertVideo(e)"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="lucide-paperclip"
-                label="Attach"
-                tooltip="Attach file"
-                :disabled="!canInsertAttachment(e)"
-                @click="insertAttachment(e)"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="lucide-code"
-                label="Code block"
-                tooltip="Code block"
-                :disabled="!canInsertCodeBlock(e)"
-                @click="insertCodeBlock(e)"
-              />
-            </TooltipProvider>
-          </template>
-        </div>
-        <div class="flex items-center justify-between gap-2 sm:justify-end">
-          <div class="sm:hidden">
-            <slot name="actions-left" />
+            </template>
+            <template v-else>
+              <TooltipProvider>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-plus"
+                  label="Insert"
+                  tooltip="Insert"
+                  @click="openSlashCommands(e)"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-case-sensitive"
+                  label="Text tools"
+                  tooltip="Text tools"
+                  @click="emit('update:toolbarExpanded', true)"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-at-sign"
+                  label="Mention"
+                  tooltip="Mention"
+                  @click="openMentions(e)"
+                />
+                <EmojiPicker @select="insertEmoji(e, $event)">
+                  <template #trigger>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon="lucide-smile"
+                      label="Emoji"
+                      tooltip="Emoji"
+                    />
+                  </template>
+                </EmojiPicker>
+                <span class="mx-1 h-5 border-l border-outline-gray-2" aria-hidden="true" />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-image"
+                  label="Image"
+                  tooltip="Image"
+                  :disabled="!canInsertImage(e)"
+                  @click="insertImage(e)"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-video"
+                  label="Video"
+                  tooltip="Video"
+                  :disabled="!canInsertVideo(e)"
+                  @click="insertVideo(e)"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-paperclip"
+                  label="Attach"
+                  tooltip="Attach file"
+                  :disabled="!canInsertAttachment(e)"
+                  @click="insertAttachment(e)"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-code"
+                  label="Code block"
+                  tooltip="Code block"
+                  :disabled="!canInsertCodeBlock(e)"
+                  @click="insertCodeBlock(e)"
+                />
+                <Button
+                  v-if="canAttachPoll"
+                  size="sm"
+                  variant="ghost"
+                  icon="lucide-bar-chart-2"
+                  label="Poll"
+                  tooltip="Poll"
+                  :disabled="hasPollBlock(e)"
+                  @click="e.chain().focus().insertPollBlock().run()"
+                />
+              </TooltipProvider>
+            </template>
           </div>
-          <div class="flex items-center justify-end space-x-2">
-            <Button v-bind="discardButtonProps || {}"> Discard </Button>
-            <Button variant="solid" v-bind="submitButtonProps || {}"> Submit </Button>
-          </div>
+        </ScrollArea>
+        <div class="flex items-center justify-end space-x-2">
+          <Button v-bind="discardButtonProps || {}"> Discard </Button>
+          <Button variant="solid" v-bind="submitButtonProps || {}"> Submit </Button>
         </div>
       </div>
     </template>

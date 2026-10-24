@@ -9,7 +9,14 @@ from gameplan.gameplan.doctype.gp_notification.gp_notification import GPNotifica
 from gameplan.mixins.activity import HasActivity
 from gameplan.mixins.archivable import check_if_space_is_archived
 from gameplan.mixins.mentions import HasMentions
-from gameplan.permissions import content_has_permission, task_query_conditions
+from gameplan.mixins.reactions import get_reactions_on
+from gameplan.permissions import (
+	content_has_permission,
+	task_access_criterion,
+	task_query_conditions,
+)
+from gameplan.search_sqlite import enqueue_comment_reindex_on_move
+from gameplan.utils.document import with_stored_document
 
 
 class GPTask(HasMentions, HasActivity, Document):
@@ -31,6 +38,7 @@ class GPTask(HasMentions, HasActivity, Document):
 	def on_update(self):
 		self.notify_mentions()
 		self.log_value_updates()
+		enqueue_comment_reindex_on_move(self)
 
 	def log_value_updates(self):
 		fields = ["title", "description", "status", "priority", "assigned_to", "due_date", "project"]
@@ -64,8 +72,20 @@ class GPTask(HasMentions, HasActivity, Document):
 		frappe.get_doc("GP Project", self.project).update_tasks_count()
 
 	@frappe.whitelist(methods=["POST"])
+	@with_stored_document
 	def track_visit(self):
 		GPNotification.clear_notifications(task=self.name)
+
+	@frappe.whitelist(methods=["GET"])
+	@with_stored_document
+	def thread_reactions(self):
+		"""Reactions on everything in this thread, for the thread page."""
+		comments = frappe.get_all(
+			"GP Comment",
+			filters={"reference_doctype": self.doctype, "reference_name": self.name},
+			pluck="name",
+		)
+		return get_reactions_on({"GP Comment": comments})
 
 
 @frappe.whitelist()
@@ -94,14 +114,24 @@ def get_list(
 		offset=start,
 		limit=limit + 1,
 		group_by=group_by,
+		ignore_permissions=False,
 	)
+	Task = frappe.qb.DocType(doctype)
+	query = apply_task_access_filter(query, Task)
 	if assigned_or_owner:
-		Task = frappe.qb.DocType(doctype)
 		query = query.where((Task.assigned_to == assigned_or_owner) | (Task.owner == assigned_or_owner))
 
 	data = query.run(as_dict=True, debug=debug)
 	frappe.response["has_next_page"] = len(data) > limit
 	return data[:limit]
+
+
+def apply_task_access_filter(query, Task, user=None):
+	"""Restrict a GP Task query to the tasks `user` may see (see task_access_criterion)."""
+	criterion = task_access_criterion(Task, user)
+	if criterion is None:
+		return query
+	return query.where(criterion)
 
 
 def get_permission_query_conditions(user):

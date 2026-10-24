@@ -5,7 +5,7 @@
         class="flex shrink-0 items-center justify-between border-b border-outline-gray-1 px-4 py-3"
       >
         <Dialog.Title as-child>
-          <h2 class="text-lg font-medium text-ink-gray-9">Customize sidebar</h2>
+          <h2 class="text-md font-medium text-ink-gray-9">Customize sidebar</h2>
         </Dialog.Title>
         <Dialog.Close as-child>
           <Button variant="ghost" label="Close" icon="lucide-x" />
@@ -28,7 +28,7 @@
                   :key="community.name"
                   data-sortable-section="shown"
                   :data-sortable-id="community.name"
-                  class="group relative flex min-h-8 w-full touch-none cursor-grab select-none items-center gap-2 rounded px-1.5 py-0.5 text-left text-ink-gray-8 hover:bg-surface-gray-1"
+                  class="group relative flex min-h-8 w-full touch-none cursor-grab select-none items-center gap-2 rounded-4 px-1.5 py-0.5 text-left text-ink-gray-8 hover:bg-surface-gray-1"
                   :class="getCommunityRowClasses(community.name)"
                   :style="getItemStyle(community.name, 'shown')"
                   @pointerdown="startPointerDrag($event, community.name, 'shown')"
@@ -84,7 +84,7 @@
                 :key="community.name"
                 data-sortable-section="hidden"
                 :data-sortable-id="community.name"
-                class="group relative flex min-h-8 w-full touch-none cursor-grab select-none items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-ink-gray-8 hover:bg-surface-gray-1"
+                class="group relative flex min-h-8 w-full touch-none cursor-grab select-none items-center gap-2 rounded-5 px-1.5 py-0.5 text-left text-ink-gray-8 hover:bg-surface-gray-1"
                 :class="getCommunityRowClasses(community.name)"
                 :style="getItemStyle(community.name, 'hidden')"
                 @pointerdown="startPointerDrag($event, community.name, 'hidden')"
@@ -163,6 +163,7 @@ import {
 } from '@/data/sidebarPreferences'
 import { sessionUser } from '@/data/session'
 import { useSessionUser } from '@/data/users'
+import { extractServerMessage } from '@/utils'
 import {
   usePointerSortableSections,
   type PointerSortableCommit,
@@ -292,7 +293,7 @@ function getCommunityRowClasses(communityName: string) {
 
 function getCommunityListClasses(section: SidebarSection) {
   return [
-    'min-h-16 rounded-lg border border-outline-gray-2 px-1.5 py-2 transition-colors',
+    'min-h-16 rounded-6 border border-outline-gray-2 px-1.5 py-2 transition-colors',
     activeSection.value === section ? 'border-outline-gray-4' : '',
   ]
 }
@@ -383,8 +384,8 @@ async function saveChanges() {
     initialBadgeStyle.value = selectedBadgeStyle.value
     show.value = false
     toast.success('Sidebar updated')
-  } catch {
-    toast.error('Failed to update sidebar')
+  } catch (error) {
+    toast.error(extractServerMessage(error) || 'Failed to update sidebar')
   } finally {
     isSaving.value = false
   }

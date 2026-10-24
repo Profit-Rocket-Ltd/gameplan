@@ -8,13 +8,13 @@ import {
 import { until } from '@vueuse/core'
 import { call } from 'frappe-ui'
 import { session } from './data/session'
-import { users } from './data/users'
+import { users, usersReady } from './data/users'
 import { communities, getCommunity } from './data/communities'
 import { spaces, getSpace } from './data/spaces'
 import type { Space } from './data/spaces'
 import { communityState } from './data/communityState'
 import { settingsBackgroundPath } from './components/Settings'
-import { getScrollContainer, scrollTo } from 'frappe-ui'
+import { shellScrollContainer } from 'frappe-ui'
 
 declare const __FRONTEND_ROUTE__: string
 
@@ -61,6 +61,23 @@ function redirectOldSpacesRoute(to: RouteLocationNormalized): RouteLocationRaw {
   }
 
   return getHomeRoute()
+}
+
+/**
+ * `/:teamId` is the legacy single-segment community URL. It matches anything, so a stale
+ * link such as `/g/teams` (the app lived at `/teams` before it moved to `/g`) used to be
+ * read as a community id and land on the 404 page. Only redirect when the community really
+ * exists; send everything else home.
+ */
+async function redirectLegacyTeamRoute(to: RouteLocationNormalized): Promise<RouteLocationRaw> {
+  await ensureCommunityDataLoaded()
+
+  const communityId = routeParam(to.params.teamId)
+  if (!communityId || !getCommunity(communityId)) {
+    return getHomeRoute()
+  }
+
+  return { name: 'Discussions', params: { communityId } }
 }
 
 const routes: RouteRecordRaw[] = [
@@ -213,6 +230,7 @@ const routes: RouteRecordRaw[] = [
     path: '/page/:pageId/:slug?',
     component: () => import('@/pages/Page.vue'),
     props: true,
+    meta: { hideMobileNav: true },
   },
   {
     path: '/people',
@@ -282,7 +300,7 @@ const routes: RouteRecordRaw[] = [
         path: 'pages/:pageId/:slug?',
         component: () => import('@/pages/Page.vue'),
         props: true,
-        meta: { hideHeader: true, communityScope: true },
+        meta: { hideHeader: true, communityScope: true, hideMobileNav: true },
       },
       {
         name: 'SpaceTasks',
@@ -305,18 +323,19 @@ const routes: RouteRecordRaw[] = [
     path: '/community/:communityId/space/:spaceId/discussion/:postId/:slug?',
     component: () => import('@/pages/SpaceDiscussion.vue'),
     props: true,
-    meta: { communityScope: true },
+    meta: { communityScope: true, hideMobileNav: true },
   },
   {
     name: 'NewDiscussion',
     path: '/community/:communityId/new-discussion',
     component: () => import('@/pages/NewDiscussion/NewDiscussion.vue'),
-    meta: { communityScope: true },
+    meta: { communityScope: true, hideMobileNav: true },
   },
   {
     name: 'LegacyNewDiscussion',
     path: '/new-discussion',
     component: () => import('@/pages/NewDiscussion/NewDiscussion.vue'),
+    meta: { hideMobileNav: true },
   },
   {
     name: 'NewSpace',
@@ -342,9 +361,9 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/pages/PersonProfileProfile.vue'),
       },
       {
-        name: 'PersonProfileAboutMe',
+        // The About tab is now a card in the profile grid.
         path: 'about',
-        component: () => import('@/pages/PersonProfileAboutMe.vue'),
+        redirect: (to) => ({ name: 'PersonProfileProfile', params: to.params }),
       },
       {
         name: 'PersonProfilePosts',
@@ -374,10 +393,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/Notifications.vue'),
   },
   {
-    // Settings is an overlay: the URL changes to /settings/:tab but the dialog
-    // renders above whatever page it was opened from (see settingsBackgroundPath
-    // + the beforeEach short-circuit below). RouteGuard renders nothing because
-    // App.vue swaps the router-view to the background page while we're here.
+    // On desktop settings is an overlay: the URL changes to /settings/:tab but the
+    // dialog renders above whatever page it was opened from (see
+    // settingsBackgroundPath + the beforeEach short-circuit below), and SettingsPage
+    // never mounts because App.vue swaps the router-view to the background page.
+    // On phones there is no dialog — these routes render SettingsPage as an ordinary
+    // full-screen page.
     path: '/settings',
     meta: { settingsOverlay: true },
     redirect: { name: 'SettingsTab', params: { tab: 'profile' } },
@@ -388,13 +409,13 @@ const routes: RouteRecordRaw[] = [
         // communities list. `:view` defaults to spaces when omitted.
         path: 'communities/:communityId/:view(spaces|members)?',
         name: 'SettingsCommunity',
-        component: RouteGuard,
+        component: () => import('@/pages/SettingsPage.vue'),
         meta: { settingsOverlay: true },
       },
       {
         path: ':tab',
         name: 'SettingsTab',
-        component: RouteGuard,
+        component: () => import('@/pages/SettingsPage.vue'),
         meta: { settingsOverlay: true },
       },
     ],
@@ -552,35 +573,21 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/:teamId',
     name: 'TeamLayout',
-    redirect: { name: 'Team' },
+    redirect: (to) => ({ name: 'Team', params: { teamId: routeParam(to.params.teamId) } }),
     props: true,
     children: [
       {
         name: 'Team',
         path: '',
-        redirect: (to) => ({
-          name: 'Discussions',
-          params: { communityId: routeParam(to.params.teamId) },
-        }),
+        component: RouteGuard,
         props: true,
-        children: [
-          {
-            name: 'TeamOverview',
-            path: '',
-            redirect: (to) => ({
-              name: 'Discussions',
-              params: { communityId: routeParam(to.params.teamId) },
-            }),
-          },
-          {
-            name: 'TeamDiscussions',
-            path: 'discussions',
-            redirect: (to) => ({
-              name: 'Discussions',
-              params: { communityId: routeParam(to.params.teamId) },
-            }),
-          },
-        ],
+        beforeEnter: redirectLegacyTeamRoute,
+      },
+      {
+        name: 'TeamDiscussions',
+        path: 'discussions',
+        component: RouteGuard,
+        beforeEnter: redirectLegacyTeamRoute,
       },
       {
         name: 'ProjectLayout',
@@ -718,13 +725,13 @@ const router = createRouter({
 const scrollPositions: Record<string, number> = {}
 
 function saveAndRestoreScrollPosition(to: RouteLocationNormalized, from: RouteLocationNormalized) {
-  let scrollContainer = getScrollContainer()
+  let scrollContainer = shellScrollContainer.value
   if (scrollContainer) {
     scrollPositions[from.path] = scrollContainer.scrollTop
   }
   if (scrollPositions[to.path] !== undefined && to.path !== from.path) {
     setTimeout(() => {
-      scrollTo({ top: scrollPositions[to.path] })
+      shellScrollContainer.value?.scrollTo({ top: scrollPositions[to.path] })
     }, 0)
   }
 }
@@ -737,11 +744,15 @@ router.beforeEach(async (to, from) => {
   }
 
   if (to.name !== 'Login' && !session.isLoggedIn) {
-    window.location.href = '/login'
+    // `href` carries the router base (/g), so login returns the guest to this page.
+    window.location.href =
+      '/login?redirect-to=' + encodeURIComponent(router.resolve(to.fullPath).href)
     return { name: 'Login' }
   }
 
-  if (!users.isFinished) {
+  // Wait only for the first load. Gating on `users.isFinished` would also block every
+  // navigation behind a background reload of the user list (see `usersReady`).
+  if (!usersReady.value) {
     try {
       await users.promise
     } catch (error) {
@@ -925,7 +936,7 @@ async function getCanonicalContentRoute(
     params,
     query: to.query,
     hash: to.hash,
-    replace: true,
+    ...(isInAppNavigation ? {} : { replace: true }),
   }
 }
 

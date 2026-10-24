@@ -7,6 +7,9 @@ def before_install():
 
 
 def after_install():
+	from gameplan.roles import setup_roles
+
+	setup_roles()
 	download_rembg_model()
 
 
